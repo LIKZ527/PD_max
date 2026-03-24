@@ -23,6 +23,29 @@ PRICE_TABLE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 class TLService:
 
+    # ==================== 接口0：添加仓库 ====================
+
+    def add_warehouse(self, name: str) -> Dict[str, Any]:
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id FROM dict_warehouses WHERE name = %s",
+                        (name,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        return {"code": 200, "msg": "仓库已存在", "仓库id": row[0], "新建": False}
+                    warehouse_code = f"WH_{uuid.uuid4().hex[:8].upper()}"
+                    cur.execute(
+                        "INSERT INTO dict_warehouses (warehouse_code, name, is_active) VALUES (%s, %s, 1)",
+                        (warehouse_code, name),
+                    )
+                    return {"code": 200, "msg": "仓库新建成功", "仓库id": cur.lastrowid, "新建": True}
+        except Exception as e:
+            logger.error(f"添加仓库失败: {e}")
+            raise
+
     # ==================== 接口1：获取仓库列表 ====================
 
     def get_warehouses(self) -> List[Dict[str, Any]]:
@@ -181,7 +204,7 @@ class TLService:
         return None
 
     def upload_price_table(self, files: List[Any]) -> Dict[str, Any]:
-        saved_paths: List[Tuple[str, str, str]] = []  # (save_path, md5, original_filename)
+        saved_paths: List[Tuple[str, str, str]] = []
         try:
             # 1. 保存图片到磁盘
             for upload_file in files:
@@ -195,86 +218,42 @@ class TLService:
                     f.write(content)
                 saved_paths.append((str(save_path), md5, upload_file.filename))
 
-            # 2. 从数据库加载冶炼厂和品类字典
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT id, name FROM dict_factories WHERE is_active = 1"
-                    )
-                    factory_list: List[Tuple[int, str]] = list(cur.fetchall())
-
-                    cur.execute(
-                        "SELECT row_id, category_id, name "
-                        "FROM dict_categories WHERE is_active = 1"
-                    )
-                    category_list: List[Tuple[int, int, str]] = list(cur.fetchall())
-
-            # 3. 对每张图片做 OCR 解析 + 匹配
+            # 2. OCR 识别，直接返回原始识别结果
             ocr_service = BatteryQuoteService()
 
-            # parsed: {factory_id: {category_id: price}}
-            parsed: Dict[int, Dict[int, float]] = {}
-            unmatched_factories: List[str] = []
-            unmatched_categories: List[str] = []
+            items: List[Dict[str, Any]] = []
             details: List[Dict[str, Any]] = []
 
             for image_path, md5, orig_name in saved_paths:
                 ocr_result = ocr_service.parse_image(image_path)
 
                 if ocr_result.get("error"):
-                    details.append({
-                        "image": orig_name,
-                        "error": ocr_result["error"],
-                    })
+                    details.append({"image": orig_name, "error": ocr_result["error"]})
                     continue
 
                 factory_name_ocr = ocr_result.get("factory", "未知工厂")
-                factory_id = self._match_factory(factory_name_ocr, factory_list)
-
-                if factory_id is None and factory_name_ocr != "未知工厂":
-                    if factory_name_ocr not in unmatched_factories:
-                        unmatched_factories.append(factory_name_ocr)
-
                 image_detail: Dict[str, Any] = {
                     "image": orig_name,
                     "factory_name": factory_name_ocr,
-                    "factory_id": factory_id,
                     "date": ocr_result.get("date"),
                     "items": [],
                 }
 
                 for item in ocr_result.get("items", []):
-                    raw_cat = item["category"]
-                    price = item["price"]
-
-                    match = self._match_category(raw_cat, category_list)
-                    if match:
-                        cat_id, row_id = match
-                    else:
-                        cat_id, row_id = None, None
-                        if raw_cat not in unmatched_categories:
-                            unmatched_categories.append(raw_cat)
-
-                    image_detail["items"].append({
-                        "raw_category_name": raw_cat,
-                        "category_id": cat_id,
-                        "price": price,
-                    })
-
-                    # 汇总到 parsed 结构
-                    if factory_id is not None and cat_id is not None:
-                        parsed.setdefault(factory_id, {})[cat_id] = price
+                    row_item = {
+                        "冶炼厂名": factory_name_ocr,
+                        "品类名": item["category"],
+                        "价格": item["price"],
+                    }
+                    items.append(row_item)
+                    image_detail["items"].append(row_item)
 
                 details.append(image_detail)
 
             return {
                 "code": 200,
                 "data": {
-                    "parsed": parsed,
-                    "unmatched": {
-                        "factories": unmatched_factories,
-                        "categories": unmatched_categories,
-                    },
+                    "items": items,
                     "details": details,
                 },
             }
@@ -293,12 +272,12 @@ class TLService:
     def confirm_price_table(
         self,
         quote_date_str: str,
-        warehouse_id: int,
         items: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """
         前端确认后，将报价数据写入 quote_orders + quote_details。
-        items 格式: [{"冶炼厂id": 1, "品类id": 3, "价格": 9350, "原始品类名": "电动车"}, ...]
+        items 格式: [{"冶炼厂名": "xxx", "冶炼厂id": 1或null, "品类名": "xxx", "品类id": 3或null, "价格": 9350}, ...]
+        冶炼厂id/品类id为null时自动新建。
         """
         if not items:
             raise ValueError("报价数据不能为空")
@@ -313,34 +292,75 @@ class TLService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    # 插入主单
-                    cur.execute(
-                        "INSERT INTO quote_orders "
-                        "(quote_date, upload_batch_no, warehouse_id, status) "
-                        "VALUES (%s, %s, %s, 'DRAFT')",
-                        (quote_dt, batch_no, warehouse_id),
-                    )
-                    order_id = cur.lastrowid
-
-                    # 插入明细
+                    # 1. 自动新建缺失的冶炼厂和品类
                     for item in items:
-                        factory_id = item["冶炼厂id"]
-                        category_id = item.get("品类id")
-                        price = item["价格"]
-                        raw_name = item.get("原始品类名", "")
-
-                        # 查找 mapped_category_row_id
-                        mapped_row_id = None
-                        if category_id is not None:
+                        # 冶炼厂不存在则新建
+                        if item.get("冶炼厂id") is None:
+                            factory_name = item["冶炼厂名"]
                             cur.execute(
-                                "SELECT row_id FROM dict_categories "
-                                "WHERE category_id = %s AND is_active = 1 "
-                                "ORDER BY is_main DESC LIMIT 1",
-                                (category_id,),
+                                "SELECT id FROM dict_factories WHERE name = %s",
+                                (factory_name,),
                             )
                             row = cur.fetchone()
                             if row:
-                                mapped_row_id = row[0]
+                                item["冶炼厂id"] = row[0]
+                            else:
+                                factory_code = f"FAC_{uuid.uuid4().hex[:8].upper()}"
+                                cur.execute(
+                                    "INSERT INTO dict_factories (factory_code, name, is_active) "
+                                    "VALUES (%s, %s, 1)",
+                                    (factory_code, factory_name),
+                                )
+                                item["冶炼厂id"] = cur.lastrowid
+
+                        # 品类不存在则新建
+                        if item.get("品类id") is None:
+                            cat_name = item["品类名"]
+                            cur.execute(
+                                "SELECT category_id FROM dict_categories WHERE name = %s AND is_active = 1",
+                                (cat_name,),
+                            )
+                            row = cur.fetchone()
+                            if row:
+                                item["品类id"] = row[0]
+                            else:
+                                # 生成新的 category_id（取当前最大值+1）
+                                cur.execute("SELECT COALESCE(MAX(category_id), 0) + 1 FROM dict_categories")
+                                new_cat_id = cur.fetchone()[0]
+                                cat_code = f"CAT_{uuid.uuid4().hex[:8].upper()}"
+                                cur.execute(
+                                    "INSERT INTO dict_categories "
+                                    "(category_id, category_code, name, is_main, is_active) "
+                                    "VALUES (%s, %s, %s, 1, 1)",
+                                    (new_cat_id, cat_code, cat_name),
+                                )
+                                item["品类id"] = new_cat_id
+
+                    # 2. 插入主单
+                    cur.execute(
+                        "INSERT INTO quote_orders "
+                        "(quote_date, upload_batch_no, status) "
+                        "VALUES (%s, %s, 'DRAFT')",
+                        (quote_dt, batch_no),
+                    )
+                    order_id = cur.lastrowid
+
+                    # 3. 插入明细
+                    for item in items:
+                        factory_id = item["冶炼厂id"]
+                        category_id = item["品类id"]
+                        price = item["价格"]
+                        cat_name = item["品类名"]
+
+                        # 查找 mapped_category_row_id
+                        cur.execute(
+                            "SELECT row_id FROM dict_categories "
+                            "WHERE category_id = %s AND is_active = 1 "
+                            "ORDER BY is_main DESC LIMIT 1",
+                            (category_id,),
+                        )
+                        row = cur.fetchone()
+                        mapped_row_id = row[0] if row else None
 
                         cur.execute(
                             "INSERT INTO quote_details "
@@ -350,10 +370,10 @@ class TLService:
                             (
                                 order_id,
                                 factory_id,
-                                raw_name,
+                                cat_name,
                                 mapped_row_id,
                                 category_id,
-                                0,  # weight_tons 暂时为 0，后续可补充
+                                0,
                                 price,
                             ),
                         )
@@ -414,6 +434,34 @@ class TLService:
             raise
         except Exception as e:
             logger.error(f"上传运费失败: {e}")
+            raise
+
+    # ==================== 接口7a：获取品类映射表 ====================
+
+    def get_category_mapping(self) -> List[Dict[str, Any]]:
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT category_id, name, is_main "
+                        "FROM dict_categories "
+                        "WHERE is_active = 1 "
+                        "ORDER BY category_id, is_main DESC, row_id"
+                    )
+                    rows = cur.fetchall()
+
+            result: Dict[int, Dict[str, Any]] = {}
+            for cat_id, name, is_main in rows:
+                if cat_id not in result:
+                    result[cat_id] = {"品类id": cat_id, "品类名称": []}
+                if is_main:
+                    result[cat_id]["品类名称"].insert(0, name)
+                else:
+                    result[cat_id]["品类名称"].append(name)
+
+            return list(result.values())
+        except Exception as e:
+            logger.error(f"获取品类映射表失败: {e}")
             raise
 
     # ==================== 接口7：更新品类映射表 ====================

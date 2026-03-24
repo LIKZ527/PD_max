@@ -18,12 +18,26 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from app.models.tl import (
     ComparisonRequest,
     UploadFreightRequest,
-    UpdateCategoryMappingRequest,
+    CategoryMappingItem,
     ConfirmPriceTableRequest,
+    AddWarehouseRequest,
 )
 from app.services.tl_service import TLService, get_tl_service
 
 router = APIRouter(prefix="/tl", tags=["TL比价模块"])
+
+
+# ===================== 接口0：添加仓库 =====================
+
+@router.post("/add_warehouse", summary="添加仓库")
+def add_warehouse(
+    body: AddWarehouseRequest,
+    service: TLService = Depends(get_tl_service),
+):
+    try:
+        return service.add_warehouse(name=body.仓库名)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ===================== 接口1：获取仓库列表 =====================
@@ -108,7 +122,6 @@ def confirm_price_table(
         items = [item.model_dump() for item in body.数据]
         return service.confirm_price_table(
             quote_date_str=body.报价日期,
-            warehouse_id=body.仓库id,
             items=items,
         )
     except ValueError as e:
@@ -133,18 +146,31 @@ def upload_freight(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ===================== 接口7a：获取品类映射表 =====================
+
+@router.get("/get_category_mapping", summary="获取品类映射表")
+def get_category_mapping(service: TLService = Depends(get_tl_service)):
+    try:
+        data = service.get_category_mapping()
+        return {"code": 200, "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ===================== 接口7：更新品类映射表 =====================
 
 @router.post("/update_category_mapping", summary="更新品类映射表")
 def update_category_mapping(
-    body: UpdateCategoryMappingRequest,
+    body: List[CategoryMappingItem],
     service: TLService = Depends(get_tl_service),
 ):
     try:
-        return service.update_category_mapping(
-            category_id=body.品类id,
-            names=body.品类名称,
-        )
+        for item in body:
+            service.update_category_mapping(
+                category_id=item.品类id,
+                names=item.品类名称,
+            )
+        return {"code": 200, "msg": "品类映射表更新成功，数据已存入数据库"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
