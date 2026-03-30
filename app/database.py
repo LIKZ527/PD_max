@@ -127,21 +127,61 @@ TABLE_STATEMENTS = [
         INDEX idx_effective_date (effective_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='运费价格表';
     """,
-    # 报价明细表
+    # 报价表元数据表（存储报价表的整体信息）
+    """
+    CREATE TABLE IF NOT EXISTS quote_table_metadata (
+        id INT AUTO_INCREMENT PRIMARY KEY COMMENT '报价表ID',
+        factory_id INT NOT NULL COMMENT '冶炼厂ID',
+        quote_date DATE NOT NULL COMMENT '报价日期',
+        execution_date VARCHAR(50) COMMENT '执行日期（如：2026年3月17日）',
+        doc_title VARCHAR(200) COMMENT '文档标题（如：废铅酸蓄电池回收价格报价表）',
+        price_unit VARCHAR(50) DEFAULT '元/吨' COMMENT '价格单位',
+        has_merged_cells TINYINT(1) DEFAULT 0 COMMENT '是否有合并单元格',
+        vat_columns_detected JSON COMMENT '检测到的VAT列类型（JSON数组）',
+        raw_full_text LONGTEXT COMMENT '原始完整识别文本',
+        markdown_table LONGTEXT COMMENT 'Markdown格式的表格',
+        processing_time DECIMAL(10, 2) COMMENT '处理耗时（秒）',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_metadata_factory FOREIGN KEY (factory_id) REFERENCES dict_factories (id) ON UPDATE CASCADE ON DELETE RESTRICT,
+        UNIQUE KEY uk_factory_quote_date (factory_id, quote_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='报价表元数据表';
+    """,
+    # 报价明细表（优化版本）
     """
     CREATE TABLE IF NOT EXISTS quote_details (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        quote_date DATE NOT NULL COMMENT '报价日期',
-        factory_id INT NOT NULL COMMENT '冶炼厂ID',
+        metadata_id INT NOT NULL COMMENT '报价表元数据ID',
         category_id INT NOT NULL COMMENT '品类ID',
         raw_category_name VARCHAR(100) NOT NULL COMMENT '原始品类名',
         unit_price DECIMAL(10, 2) NOT NULL COMMENT '单价（元/吨）',
+        price_1pct_vat DECIMAL(10, 2) COMMENT '1%增值税价格',
+        price_3pct_vat DECIMAL(10, 2) COMMENT '3%增值税价格',
+        price_13pct_vat DECIMAL(10, 2) COMMENT '13%增值税价格',
+        price_normal_invoice DECIMAL(10, 2) COMMENT '普通发票价格',
+        price_reverse_invoice DECIMAL(10, 2) COMMENT '反向发票价格',
+        remark VARCHAR(500) COMMENT '备注（如：均为控水价格）',
+        raw_text VARCHAR(500) COMMENT '原始识别文本',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY uk_date_factory_category (quote_date, factory_id, category_id),
-        CONSTRAINT fk_detail_factory FOREIGN KEY (factory_id) REFERENCES dict_factories (id) ON UPDATE CASCADE ON DELETE RESTRICT,
+        UNIQUE KEY uk_metadata_category (metadata_id, category_id),
+        CONSTRAINT fk_detail_metadata FOREIGN KEY (metadata_id) REFERENCES quote_table_metadata (id) ON UPDATE CASCADE ON DELETE CASCADE,
         CONSTRAINT fk_detail_category FOREIGN KEY (category_id) REFERENCES dict_categories (row_id) ON UPDATE CASCADE ON DELETE RESTRICT
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='报价明细表';
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='报价明细表（优化版本）';
+    """,
+    # 报价表规则和备注表
+    """
+    CREATE TABLE IF NOT EXISTS quote_table_rules (
+        id INT AUTO_INCREMENT PRIMARY KEY COMMENT '规则ID',
+        metadata_id INT NOT NULL COMMENT '报价表元数据ID',
+        rule_type ENUM('footer_note', 'policy', 'brand_spec') DEFAULT 'footer_note' COMMENT '规则类型',
+        rule_order INT DEFAULT 0 COMMENT '规则顺序',
+        rule_content TEXT NOT NULL COMMENT '规则内容',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_rule_metadata FOREIGN KEY (metadata_id) REFERENCES quote_table_metadata (id) ON UPDATE CASCADE ON DELETE CASCADE,
+        INDEX idx_metadata_type (metadata_id, rule_type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='报价表规则和备注表';
     """,
     # 仓库库存表（最小化：仓库+品类+可用吨数）
     """
