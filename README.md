@@ -1,6 +1,6 @@
-# TL比价系统
+# TL比价系统（含AI鉴伪）
 
-废旧电池回收比价系统后端，基于 FastAPI 构建。支持仓库/冶炼厂/品类管理、运费维护、**OCR图片识别自动提取报价**、比价表生成。
+废旧电池回收比价系统后端，基于 FastAPI 构建。支持仓库/冶炼厂/品类管理、运费维护、**OCR图片识别自动提取报价**、比价表生成，以及**图片篡改鉴伪**能力。
 
 ## 项目结构
 
@@ -34,6 +34,11 @@ test_ocr.py                  # OCR功能测试脚本
 | 5b | POST | `/tl/confirm_price_table` | 确认并写入报价数据到数据库 |
 | 6 | POST | `/tl/upload_freight` | 上传运费 |
 | 7 | POST | `/tl/update_category_mapping` | 更新品类映射表 |
+| 8 | POST | `/ai-detection/api/v1/image-detection/detect` | 单图单框鉴伪（同步） |
+| 9 | POST | `/ai-detection/api/v3/detect` | 提交鉴伪任务（异步） |
+| 10 | GET | `/ai-detection/api/v3/result/{task_id}` | 查询鉴伪结果 |
+| 11 | GET | `/ai-detection/api/v3/result/{task_id}/visualization` | 获取可视化标注图 |
+| 12 | DELETE | `/ai-detection/api/v3/task/{task_id}` | 取消/删除鉴伪任务 |
 
 详细接口文档见 [docs/api.md](docs/api.md)。
 
@@ -43,7 +48,6 @@ test_ocr.py                  # OCR功能测试脚本
 
 ```bash
 pip install -r requirements.txt
-pip install rapidocr_onnxruntime
 ```
 
 ### 2. 环境变量（准备一次即可）
@@ -86,6 +90,19 @@ uv run --no-sync uvicorn app.main:app --host 0.0.0.0 --reload --port 8002
 
 以上方法适用于本地快速开发；Compose 细节见 [docs/docker.md](docs/docker.md)。
 
+若遇到 `ModuleNotFoundError: No module named 'easyocr'`，请在项目根目录执行：
+
+```bash
+uv sync
+```
+
+## AI鉴伪模块说明
+
+- 接口前缀：`/ai-detection`
+- 启动时会自动加载 OCR 与鉴伪模型（首次启动耗时会更长）
+- 鉴伪文件默认保存在 `UPLOAD_DIR/ai_detection_storage`（默认 `uploads/ai_detection_storage`）
+
+### 4. 测试OCR
 ### 5. 测试OCR
 
 ```bash

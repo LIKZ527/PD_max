@@ -16,6 +16,16 @@ dependencies = [
 	"bcrypt",
 	"python-jose[cryptography]",
 	"openai",
+	"opencv-python-headless",
+	"torch",
+	"torchvision",
+	"easyocr",
+	"numpy",
+	"faiss-cpu",
+	"xgboost",
+	"joblib",
+	"PyYAML",
+	"Pillow",
 ]
 
 [[tool.uv.index]]
