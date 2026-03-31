@@ -4,10 +4,13 @@ import logging
 from fastapi import FastAPI
 
 from app.api.v1.router import api_router
+from app.api.v1.routes.ai_detection import shutdown_ai_detection, startup_ai_detection
 from app.database import create_tables, init_default_data
 from app.logging_config import setup_logging
 
 setup_logging()
+logger = logging.getLogger(__name__)
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TL比价系统", version="1.0.0")
@@ -16,10 +19,19 @@ app.include_router(api_router)
 
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     create_tables()
     init_default_data()
     _init_admin()
+    try:
+        await startup_ai_detection()
+    except Exception:
+        logger.exception("AI detection init failed; TL core APIs remain available.")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await shutdown_ai_detection()
 
 
 def _init_admin():
