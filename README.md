@@ -34,7 +34,10 @@ test_ocr.py                  # OCR功能测试脚本
 | 4 | POST | `/tl/get_comparison` | 获取比价表 |
 | 5 | POST | `/tl/upload_price_table` | 上传价格表图片，OCR解析并返回匹配结果 |
 | 5b | POST | `/tl/confirm_price_table` | 确认并写入报价数据到数据库 |
+| 5c | GET | `/tl/get_quote_details_list` | 报价数据列表（支持 `start_date`/`end_date`/`variety`/`category_exact`） |
+| 5d | GET | `/tl/export_quote_details_excel` | 按相同条件导出报价 Excel |
 | 6 | POST | `/tl/upload_freight` | 上传运费 |
+| 6b | GET | `/tl/get_freight_list` | 运费列表（分页、筛选） |
 | 7 | POST | `/tl/update_category_mapping` | 更新品类映射表 |
 | 8 | POST | `/ai-detection/api/v1/image-detection/detect` | 单图单框鉴伪（同步） |
 | 9 | POST | `/ai-detection/api/v3/detect` | 提交鉴伪任务（异步） |

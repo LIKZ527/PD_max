@@ -19,3 +19,4 @@ xgboost
 joblib
 PyYAML
 Pillow
+openpyxl>=3.1.0

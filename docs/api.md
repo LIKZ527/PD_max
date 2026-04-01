@@ -301,6 +301,76 @@ file: [报价单1.jpg]
 
 ---
 
+## 接口5c：报价数据列表
+- 方法：`GET`
+- 路由：`/tl/get_quote_details_list`
+- 传入（Query，均可选）：`factory_id`（冶炼厂下拉，传冶炼厂 id）、`quote_date`（精确，YYYY-MM-DD）、`date_from` / `date_to`（报价日期区间）、**`start_date` / `end_date`**（与 `date_from` / `date_to` 等价，便于对齐「日期范围」控件）、`category_name` 或 **`variety`**（品种；同时传时以 `variety` 为准）、`category_exact`（默认 `false` 模糊匹配；下拉选具体品种名时建议 `true`）、`page`（默认1）、`page_size`（默认50，最大500）、`response_format`（默认 `full`）
+- **`response_format` 说明**
+  - `full`：`list` 每条为库表全量列（含 metadata、各价格列、时间戳等），适合后台或详情。
+  - `table`：**与「报价数据列表」前端表格列一致**，字段为：`id`、`日期`、`冶炼厂`、`品种`、`基准价`、`3%含税价`、`13%含税价`（分别对应 `quote_details` 的报价日期、冶炼厂名、品类名、`unit_price`、`price_3pct_vat`、`price_13pct_vat`）。
+- 数据来源：`quote_details` 联表 `dict_factories`
+- 排序：报价日期倒序，再冶炼厂、品类名、id
+- 列表页推荐请求（对齐查询条件区）：`GET /tl/get_quote_details_list?response_format=table&factory_id=66&start_date=2026-01-01&end_date=2026-03-31&variety=电动车电池&category_exact=true&page=1&page_size=20`
+- 模拟返回JSON（`response_format=full`）：
+```json
+{
+  "code": 200,
+  "data": {
+    "total": 120,
+    "list": [
+      {
+        "id": 1,
+        "报价日期": "2026-03-24",
+        "冶炼厂id": 1,
+        "冶炼厂": "默认冶炼厂",
+        "品类名": "电动车电池",
+        "metadata_id": 5,
+        "普通价": 9000.0,
+        "价格_1pct增值税": 9550.0,
+        "价格_3pct增值税": 9737.0,
+        "价格_13pct增值税": null,
+        "普通发票价格": null,
+        "反向发票价格": null,
+        "创建时间": "2026-03-24 10:00:00",
+        "更新时间": "2026-03-24 10:00:00"
+      }
+    ]
+  }
+}
+```
+- 模拟返回JSON（`response_format=table`，对齐列表页表头）：
+```json
+{
+  "code": 200,
+  "data": {
+    "total": 0,
+    "list": [
+      {
+        "id": 1,
+        "日期": "2026-03-24",
+        "冶炼厂": "默认冶炼厂",
+        "品种": "电动车电池",
+        "基准价": 9000.0,
+        "3%含税价": 9737.0,
+        "13%含税价": null
+      }
+    ]
+  }
+}
+```
+
+---
+
+## 接口5d：导出报价数据 Excel
+- 方法：`GET`
+- 路由：`/tl/export_quote_details_excel`
+- 传入（Query）：与接口 5c **相同的筛选参数**（`factory_id`、`quote_date`、`date_from`/`date_to` 或 `start_date`/`end_date`、`category_name` 或 `variety`、`category_exact` 等），**无分页**；服务端最多导出 50000 行（可在代码中调整上限）。
+- 输出：`.xlsx` 文件下载；表头为 **日期、冶炼厂、品种、基准价、3%含税价、13%含税价**（与列表页一致）。
+- 依赖：需安装 `openpyxl`（已写入 `requirements.txt` / `pyproject.toml`）。
+- 模拟请求：`GET /tl/export_quote_details_excel?factory_id=66&start_date=2026-01-01&end_date=2026-03-31&variety=电动车电池&category_exact=true`
+
+---
+
 ## 接口6：上传运费
 - 方法：`POST`
 - 路由：`/tl/upload_freight`
@@ -319,6 +389,39 @@ file: [报价单1.jpg]
 {
   "code": 200,
   "msg": "运费数据已存入数据库"
+}
+```
+
+---
+
+## 接口6b：运费列表
+- 方法：`GET`
+- 路由：`/tl/get_freight_list`
+- 传入（Query，均可选）：`warehouse_id`、`factory_id`、`date_from`、`date_to`（生效日期区间，YYYY-MM-DD）、`page`（默认1）、`page_size`（默认50，最大500）
+- 输出：`total` + `list`（每条含 id、仓库/冶炼厂 id 与名称、运费、生效日期、创建/更新时间）
+- 数据来源：`freight_rates` 联表 `dict_warehouses`、`dict_factories`
+- 排序：生效日期倒序，再 id
+- 模拟请求：`GET /tl/get_freight_list?warehouse_id=1&date_from=2026-04-01`
+- 模拟返回JSON：
+```json
+{
+  "code": 200,
+  "data": {
+    "total": 3,
+    "list": [
+      {
+        "id": 1,
+        "仓库id": 1,
+        "仓库名": "默认仓库",
+        "冶炼厂id": 1,
+        "冶炼厂": "默认冶炼厂",
+        "运费": 200.0,
+        "生效日期": "2026-04-01",
+        "创建时间": "2026-04-01 08:00:00",
+        "更新时间": "2026-04-01 08:00:00"
+      }
+    ]
+  }
 }
 ```
 
