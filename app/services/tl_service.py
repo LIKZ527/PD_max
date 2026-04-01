@@ -3,10 +3,11 @@ TL比价模块服务层
 负责仓库、冶炼厂、品类、比价、运费、价格表、品类映射等数据库操作
 """
 import hashlib
+import io
 import logging
 import os
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,6 +20,18 @@ logger = logging.getLogger(__name__)
 
 PRICE_TABLE_UPLOAD_DIR = Path(UPLOAD_DIR) / "price_tables"
 PRICE_TABLE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _cell_json(v: Any) -> Any:
+    if v is None:
+        return None
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, datetime):
+        return v.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(v, date):
+        return v.isoformat()
+    return v
 
 
 class TLService:
@@ -846,6 +859,308 @@ class TLService:
             raise
         except Exception as e:
             logger.error(f"上传运费失败: {e}")
+            raise
+
+    # ==================== 接口6b：运费列表 ====================
+
+    def get_freight_list(
+        self,
+        warehouse_id: Optional[int] = None,
+        factory_id: Optional[int] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> Dict[str, Any]:
+        if page < 1:
+            raise ValueError("page 必须 >= 1")
+        page_size = min(max(page_size, 1), 500)
+        d_from: Optional[date] = None
+        d_to: Optional[date] = None
+        if date_from:
+            try:
+                d_from = date.fromisoformat(date_from)
+            except (ValueError, TypeError):
+                raise ValueError(f"date_from 格式不正确: {date_from}，应为 YYYY-MM-DD")
+        if date_to:
+            try:
+                d_to = date.fromisoformat(date_to)
+            except (ValueError, TypeError):
+                raise ValueError(f"date_to 格式不正确: {date_to}，应为 YYYY-MM-DD")
+        if d_from and d_to and d_from > d_to:
+            raise ValueError("date_from 不能晚于 date_to")
+
+        conditions: List[str] = ["1=1"]
+        params: List[Any] = []
+        if warehouse_id is not None:
+            conditions.append("fr.warehouse_id = %s")
+            params.append(warehouse_id)
+        if factory_id is not None:
+            conditions.append("fr.factory_id = %s")
+            params.append(factory_id)
+        if d_from is not None:
+            conditions.append("fr.effective_date >= %s")
+            params.append(d_from)
+        if d_to is not None:
+            conditions.append("fr.effective_date <= %s")
+            params.append(d_to)
+        where_sql = " AND ".join(conditions)
+        offset = (page - 1) * page_size
+
+        base_from = (
+            "FROM freight_rates fr "
+            "JOIN dict_warehouses dw ON fr.warehouse_id = dw.id "
+            "JOIN dict_factories df ON fr.factory_id = df.id "
+            f"WHERE {where_sql}"
+        )
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT COUNT(*) {base_from}", tuple(params))
+                    total = cur.fetchone()[0]
+
+                    cur.execute(
+                        f"""
+                        SELECT fr.id,
+                               fr.warehouse_id AS `仓库id`,
+                               dw.name AS `仓库名`,
+                               fr.factory_id AS `冶炼厂id`,
+                               df.name AS `冶炼厂`,
+                               fr.price_per_ton AS `运费`,
+                               fr.effective_date AS `生效日期`,
+                               fr.created_at AS `创建时间`,
+                               fr.updated_at AS `更新时间`
+                        {base_from}
+                        ORDER BY fr.effective_date DESC, fr.id DESC
+                        LIMIT %s OFFSET %s
+                        """,
+                        tuple(params) + (page_size, offset),
+                    )
+                    cols = [d[0] for d in cur.description]
+                    rows = [
+                        {c: _cell_json(v) for c, v in zip(cols, r)}
+                        for r in cur.fetchall()
+                    ]
+            return {"code": 200, "data": {"total": total, "list": rows}}
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"获取运费列表失败: {e}")
+            raise
+
+    def _prepare_quote_details_filter(
+        self,
+        factory_id: Optional[int],
+        quote_date: Optional[str],
+        date_from: Optional[str],
+        date_to: Optional[str],
+        category_name: Optional[str],
+        category_exact: bool,
+    ) -> Tuple[str, List[Any]]:
+        """报价明细列表/导出共用的 WHERE 与参数（含日期与品种校验）。"""
+        qd_exact: Optional[date] = None
+        d_from: Optional[date] = None
+        d_to: Optional[date] = None
+        if quote_date:
+            try:
+                qd_exact = date.fromisoformat(quote_date)
+            except (ValueError, TypeError):
+                raise ValueError(f"quote_date 格式不正确: {quote_date}，应为 YYYY-MM-DD")
+        if date_from:
+            try:
+                d_from = date.fromisoformat(date_from)
+            except (ValueError, TypeError):
+                raise ValueError(f"date_from 格式不正确: {date_from}，应为 YYYY-MM-DD")
+        if date_to:
+            try:
+                d_to = date.fromisoformat(date_to)
+            except (ValueError, TypeError):
+                raise ValueError(f"date_to 格式不正确: {date_to}，应为 YYYY-MM-DD")
+        if d_from and d_to and d_from > d_to:
+            raise ValueError("date_from 不能晚于 date_to")
+
+        conditions: List[str] = ["1=1"]
+        params: List[Any] = []
+        if factory_id is not None:
+            conditions.append("qd.factory_id = %s")
+            params.append(factory_id)
+        if qd_exact is not None:
+            conditions.append("qd.quote_date = %s")
+            params.append(qd_exact)
+        if d_from is not None:
+            conditions.append("qd.quote_date >= %s")
+            params.append(d_from)
+        if d_to is not None:
+            conditions.append("qd.quote_date <= %s")
+            params.append(d_to)
+        if category_name:
+            if category_exact:
+                conditions.append("qd.category_name = %s")
+                params.append(category_name)
+            else:
+                conditions.append("qd.category_name LIKE %s")
+                params.append(f"%{category_name}%")
+        where_sql = " AND ".join(conditions)
+        return where_sql, params
+
+    # ==================== 接口5c：报价数据列表 ====================
+
+    def get_quote_details_list(
+        self,
+        factory_id: Optional[int] = None,
+        quote_date: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        category_name: Optional[str] = None,
+        category_exact: bool = False,
+        page: int = 1,
+        page_size: int = 50,
+        response_format: str = "full",
+    ) -> Dict[str, Any]:
+        if response_format not in ("full", "table"):
+            raise ValueError('response_format 仅支持 "full" 或 "table"')
+        if page < 1:
+            raise ValueError("page 必须 >= 1")
+        page_size = min(max(page_size, 1), 500)
+        where_sql, params = self._prepare_quote_details_filter(
+            factory_id=factory_id,
+            quote_date=quote_date,
+            date_from=date_from,
+            date_to=date_to,
+            category_name=category_name,
+            category_exact=category_exact,
+        )
+        offset = (page - 1) * page_size
+
+        base_from = (
+            "FROM quote_details qd "
+            "JOIN dict_factories df ON qd.factory_id = df.id "
+            f"WHERE {where_sql}"
+        )
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT COUNT(*) {base_from}", tuple(params))
+                    total = cur.fetchone()[0]
+
+                    cur.execute(
+                        f"""
+                        SELECT qd.id,
+                               qd.quote_date AS `报价日期`,
+                               qd.factory_id AS `冶炼厂id`,
+                               df.name AS `冶炼厂`,
+                               qd.category_name AS `品类名`,
+                               qd.metadata_id,
+                               qd.unit_price AS `普通价`,
+                               qd.price_1pct_vat AS `价格_1pct增值税`,
+                               qd.price_3pct_vat AS `价格_3pct增值税`,
+                               qd.price_13pct_vat AS `价格_13pct增值税`,
+                               qd.price_normal_invoice AS `普通发票价格`,
+                               qd.price_reverse_invoice AS `反向发票价格`,
+                               qd.created_at AS `创建时间`,
+                               qd.updated_at AS `更新时间`
+                        {base_from}
+                        ORDER BY qd.quote_date DESC, qd.factory_id, qd.category_name, qd.id DESC
+                        LIMIT %s OFFSET %s
+                        """,
+                        tuple(params) + (page_size, offset),
+                    )
+                    cols = [d[0] for d in cur.description]
+                    rows = [
+                        {c: _cell_json(v) for c, v in zip(cols, r)}
+                        for r in cur.fetchall()
+                    ]
+            if response_format == "table":
+                rows = [
+                    {
+                        "id": item["id"],
+                        "日期": item["报价日期"],
+                        "冶炼厂": item["冶炼厂"],
+                        "品种": item["品类名"],
+                        "基准价": item["普通价"],
+                        "3%含税价": item["价格_3pct增值税"],
+                        "13%含税价": item["价格_13pct增值税"],
+                    }
+                    for item in rows
+                ]
+            return {"code": 200, "data": {"total": total, "list": rows}}
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"获取报价数据列表失败: {e}")
+            raise
+
+    # ==================== 接口5d：报价数据导出 Excel ====================
+
+    def export_quote_details_excel(
+        self,
+        factory_id: Optional[int] = None,
+        quote_date: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        category_name: Optional[str] = None,
+        category_exact: bool = False,
+        max_rows: int = 50000,
+    ) -> bytes:
+        """与列表接口相同筛选条件，导出与表格列一致的 xlsx（最多 max_rows 行）。"""
+        max_rows = min(max(max_rows, 1), 100000)
+        where_sql, params = self._prepare_quote_details_filter(
+            factory_id=factory_id,
+            quote_date=quote_date,
+            date_from=date_from,
+            date_to=date_to,
+            category_name=category_name,
+            category_exact=category_exact,
+        )
+        base_from = (
+            "FROM quote_details qd "
+            "JOIN dict_factories df ON qd.factory_id = df.id "
+            f"WHERE {where_sql}"
+        )
+        try:
+            from openpyxl import Workbook
+
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT qd.quote_date,
+                               df.name,
+                               qd.category_name,
+                               qd.unit_price,
+                               qd.price_3pct_vat,
+                               qd.price_13pct_vat
+                        {base_from}
+                        ORDER BY qd.quote_date DESC, qd.factory_id, qd.category_name, qd.id DESC
+                        LIMIT %s
+                        """,
+                        tuple(params) + (max_rows,),
+                    )
+                    db_rows = cur.fetchall()
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "报价数据"
+            ws.append(["日期", "冶炼厂", "品种", "基准价", "3%含税价", "13%含税价"])
+            for row in db_rows:
+                qd_d, fname, cname, up, p3, p13 = row
+                ws.append(
+                    [
+                        qd_d.isoformat() if isinstance(qd_d, date) else qd_d,
+                        fname,
+                        cname,
+                        _cell_json(up),
+                        _cell_json(p3),
+                        _cell_json(p13),
+                    ]
+                )
+            buf = io.BytesIO()
+            wb.save(buf)
+            return buf.getvalue()
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"导出报价 Excel 失败: {e}")
             raise
 
     # ==================== 接口7a：获取品类映射表 ====================
