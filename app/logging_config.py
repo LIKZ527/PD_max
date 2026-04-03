@@ -1,7 +1,12 @@
 import logging
 import logging.handlers
 import os
+import sys
 from pathlib import Path
+
+# 避免用「root 是否已有 handlers」判断：其它库或运行环境可能先挂过 handler（甚至 NullHandler），
+# 会导致此处直接 return，应用侧 StreamHandler 从未添加，表现为「没有任何业务日志」。
+_handlers_installed = False
 
 
 def _parse_log_level(value: str) -> int:
@@ -10,20 +15,22 @@ def _parse_log_level(value: str) -> int:
 
 
 def setup_logging() -> None:
-    """Initialize project-wide logging once."""
+    """初始化项目日志：handlers 只装一次；LOG_LEVEL 每次生效（便于 reload 后读 .env）。"""
+    global _handlers_installed
     root_logger = logging.getLogger()
-    if root_logger.handlers:
+    level = _parse_log_level(os.getenv("LOG_LEVEL", "INFO"))
+    root_logger.setLevel(level)
+
+    if _handlers_installed:
         return
 
-    level = _parse_log_level(os.getenv("LOG_LEVEL", "INFO"))
     formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
     )
 
-    stream_handler = logging.StreamHandler()
+    stream_handler = logging.StreamHandler(sys.stderr)
     stream_handler.setFormatter(formatter)
     root_logger.addHandler(stream_handler)
-    root_logger.setLevel(level)
 
     log_file = os.getenv("LOG_FILE", "").strip()
     if log_file:
@@ -37,3 +44,5 @@ def setup_logging() -> None:
         )
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
+
+    _handlers_installed = True
