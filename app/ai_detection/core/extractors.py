@@ -9,6 +9,7 @@ import pickle
 import logging
 import re
 
+from app.ai_detection.easyocr_download_patch import patch_easyocr_download
 from app.ai_detection.runtime_assets import get_easyocr_reader_kwargs
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,8 @@ class FeatureExtractor:
                 "Missing dependency 'easyocr'. Install dependencies with `uv sync` "
                 "or `pip install easyocr`."
             ) from exc
+
+        patch_easyocr_download()
 
         # 预加载 OCR，只实例化一次
         self.reader = easyocr.Reader(

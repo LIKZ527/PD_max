@@ -8,6 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.ai_detection.easyocr_download_patch import patch_easyocr_download
 from app.ai_detection.inference_api import InferenceEngineAPI
 from app.ai_detection.runtime_assets import (
     EASYOCR_DOWNLOAD_ENABLED,
@@ -21,9 +22,14 @@ def main() -> None:
     import easyocr
     import torch
 
+    patch_easyocr_download()
+
     print(f"EASYOCR_MODEL_DIR={EASYOCR_MODEL_DIR}")
     print(f"TORCH_HOME={TORCH_HOME_DIR}")
     print(f"AI_EASYOCR_DOWNLOAD_ENABLED={int(EASYOCR_DOWNLOAD_ENABLED)}")
+    mp = os.getenv("EASYOCR_GITHUB_MIRROR", "").strip()
+    if mp:
+        print(f"EASYOCR_GITHUB_MIRROR={mp}")
 
     # 先单独预热 EasyOCR 自动找框用到的模型。
     easyocr.Reader(

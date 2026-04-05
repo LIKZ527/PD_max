@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from PIL import Image, ImageDraw, ImageFont
 
 from app.config import UPLOAD_DIR
+from app.ai_detection.easyocr_download_patch import patch_easyocr_download
 from app.ai_detection.runtime_assets import get_easyocr_reader_kwargs
 
 if TYPE_CHECKING:
@@ -234,6 +235,8 @@ def _create_easyocr_reader(use_gpu: bool):
     若设置 EASYOCR_MODULE_PATH，则覆盖为 {path}/model/。
     """
     import easyocr
+
+    patch_easyocr_download()
 
     kwargs: Dict[str, Any] = dict(get_easyocr_reader_kwargs(gpu=use_gpu, verbose=False))
     model_dir = os.getenv("EASYOCR_MODULE_PATH", "").strip()
