@@ -1,6 +1,6 @@
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 OPTIMAL_PRICE_BASIS_ALLOWED = frozenset(
     {"base", "1pct", "3pct", "13pct", "normal_invoice", "reverse_invoice"}
@@ -9,6 +9,9 @@ OPTIMAL_PRICE_BASIS_ALLOWED = frozenset(
 
 class ComparisonRequest(BaseModel):
     """接口4 请求体"""
+
+    model_config = ConfigDict(extra="ignore")
+
     选中仓库id列表: List[int] = Field(..., description="选中的仓库ID列表")
     冶炼厂id列表: List[int] = Field(..., description="冶炼厂ID列表")
     品类id列表: List[int] = Field(..., description="品类ID列表")
@@ -22,16 +25,12 @@ class ComparisonRequest(BaseModel):
     吨数: float = Field(
         1.0,
         gt=0,
-        description="吨数；按吨计费时总运费=每吨运费×吨数；按车计费时车数=向上取整(吨数/每车吨数)（至少1车），总运费=每车运费×车数",
-    )
-    运费计价方式: Literal["per_ton", "per_truck"] = Field(
-        "per_ton",
-        description="per_ton：运费字段为每吨单价（元/吨）；per_truck：运费字段为每车单价（元/车），默认每车35吨",
+        description="货物吨数；车数=max(1, ⌈吨数/每车吨数⌉)；总运费=车数×每车运费（元/车）",
     )
     每车吨数: float = Field(
         35.0,
         gt=0,
-        description="按车计费时一车折合吨数；车数=向上取整(吨数/每车吨数)，至少1车",
+        description="单车核定吨数；用于由吨数推算车数；总运费=每车运费×车数（运费表数值按元/车解释）",
     )
     最优价计税口径列表: List[str] = Field(
         default_factory=lambda: ["3pct"],

@@ -226,7 +226,6 @@ def get_comparison(
             category_ids=body.品类id列表,
             price_type=body.price_type,
             tons=body.吨数,
-            freight_mode=body.运费计价方式,
             tons_per_truck=body.每车吨数,
             optimal_basis_list=body.最优价计税口径列表,
             optimal_sort_basis=body.最优价排序口径,

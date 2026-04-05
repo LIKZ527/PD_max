@@ -491,15 +491,15 @@ class TLService:
         category_ids: List[int],
         price_type: Optional[str] = None,
         tons: float = 1.0,
-        freight_mode: str = "per_ton",
         tons_per_truck: float = 35.0,
         optimal_basis_list: Optional[List[str]] = None,
         optimal_sort_basis: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         price_type: 目标税率类型，None=普通价, 1pct/3pct/13pct/normal_invoice/reverse_invoice
-        吨数 t: 报价侧按吨计价；运费侧 per_ton 时总运费=每吨运费×t；per_truck 时车数=向上取整(t/每车吨数)（至少1车），总运费=每车运费×车数。
-        **展示用「报价」**：仍按所选 price_type 折合为不含税（元/吨）后写入 `报价`，`利润`=该不含税报价×t−总运费。
+        吨数 t: 报价按元/吨；**总运费**恒为：车数=max(1, ⌈t/每车吨数⌉)×**每车运费**（`freight_rates.price_per_ton` 在比价中按**元/车**使用）。
+        **展示用「报价」**：按所选 price_type 折合为不含税（元/吨）后写入 `报价`，`利润`=不含税报价×t−总运费。
+        **最优价各口径利润**=该口径下元/吨单价×t−总运费（与主利润同一套总运费）。
         同时按表中已有列统一反推 `基准价`（不含税）、`含1%税价`、`含3%税价`（与 OCR 按税点入库、再换算一致）；
         `利润_基准`=基准价×t−总运费，`利润_含3%`=含3%税价×t−总运费。
         **最优价各口径利润**：由 optimal_basis_list 指定（如 base、1pct、3pct、13pct、普票列等），每条明细返回 `最优价各口径利润` 字典；
@@ -544,8 +544,6 @@ class TLService:
 
         if price_type not in PRICE_COL_MAP:
             raise ValueError(f"不支持的 price_type: {price_type}")
-        if freight_mode not in ("per_ton", "per_truck"):
-            raise ValueError(f"不支持的运费计价方式: {freight_mode}，应为 per_ton 或 per_truck")
 
         target_col, price_type_name = PRICE_COL_MAP[price_type]
         target_tax = VAT_TAX_TYPE_MAP.get(price_type)  # None 表示不需要税率换算
@@ -717,7 +715,7 @@ class TLService:
                         return row
                 return None
 
-            # 组合结果；总运费 per_ton=运费单价×吨数；per_truck=每车运费×车数
+            # 组合结果；总运费恒为：车数×每车运费（元/车），车数由吨数与每车吨数推算
             t = float(tons)
             tp_truck = float(tons_per_truck) if tons_per_truck and tons_per_truck > 0 else 35.0
             result: List[Dict[str, Any]] = []
@@ -739,13 +737,8 @@ class TLService:
 
                     p = float(p_net) if p_net is not None else 0.0
                     fr = float(freight) if freight is not None else 0.0
-                    if freight_mode == "per_truck":
-                        # 车数 = 吨数/每车吨数 **向上取整**，不足一车按一车计（与 max(1,·) 一致）
-                        n_trucks = max(1, math.ceil(t / tp_truck))
-                        freight_cost_total = round(fr * n_trucks, 2)
-                    else:
-                        n_trucks = None
-                        freight_cost_total = round(fr * t, 2)
+                    n_trucks = max(1, math.ceil(t / tp_truck))
+                    freight_cost_total = round(fr * n_trucks, 2)
 
                     profit = round(p * t - freight_cost_total, 2)
 
@@ -780,7 +773,9 @@ class TLService:
                         "品类": cat_name,
                         "price_type": price_type_name,
                         "吨数": t,
-                        "运费计价方式": freight_mode,
+                        "运费计价方式": "per_truck",
+                        "车数": n_trucks,
+                        "每车吨数": tp_truck,
                         "运费": fr,
                         "总运费": freight_cost_total,
                         "报价": p_net if source != "unavailable" else None,
@@ -793,9 +788,6 @@ class TLService:
                         "利润_含3%": profit_3,
                         "最优价各口径利润": optimal_profits,
                     }
-                    if freight_mode == "per_truck":
-                        rec["车数"] = n_trucks
-                        rec["每车吨数"] = tp_truck
                     result.append(rec)
 
             result.sort(
