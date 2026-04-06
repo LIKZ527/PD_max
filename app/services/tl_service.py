@@ -981,6 +981,7 @@ class TLService:
                 max_tokens=app_config.VLM_MAX_TOKENS,
                 image_max_edge=app_config.VLM_IMAGE_MAX_EDGE,
                 jpeg_quality=app_config.VLM_JPEG_QUALITY,
+                request_timeout=app_config.VLM_REQUEST_TIMEOUT,
                 save_individual=False,
             )
 

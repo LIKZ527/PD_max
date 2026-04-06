@@ -93,6 +93,11 @@ try:
     VLM_JPEG_QUALITY = max(60, min(100, int(os.getenv("VLM_JPEG_QUALITY", "88"))))
 except ValueError:
     VLM_JPEG_QUALITY = 88
+try:
+    # 调用百炼/兼容 OpenAI 接口的单次 HTTP 读超时（秒），应 ≥ 上游最慢一次 VLM 耗时，且不大于 Nginx proxy_read_timeout
+    VLM_REQUEST_TIMEOUT = max(60.0, float(os.getenv("VLM_REQUEST_TIMEOUT", "600")))
+except ValueError:
+    VLM_REQUEST_TIMEOUT = 600.0
 
 
 def _env_enabled(name: str, *, default: bool = True) -> bool:

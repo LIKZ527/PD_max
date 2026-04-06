@@ -155,6 +155,11 @@ class VLMConfig(BaseModel):
         description="最长边超过此像素则缩小后再送 VLM；None 表示不缩放",
     )
     jpeg_quality: int = Field(default=88, ge=60, le=100)
+    request_timeout: float = Field(
+        default=600.0,
+        ge=30.0,
+        description="调用 VLM HTTP 客户端读超时（秒），需与 Nginx proxy_read_timeout 等一致",
+    )
     on_progress: Optional[Callable] = Field(default=None, exclude=True)
     on_error: Optional[Callable] = Field(default=None, exclude=True)
     on_complete: Optional[Callable] = Field(default=None, exclude=True)
@@ -246,7 +251,8 @@ class QwenVLFullExtractor:
         if not self._initialized:
             self._client = OpenAI(
                 api_key=self.config.api_key,
-                base_url=self.config.base_url
+                base_url=self.config.base_url,
+                timeout=self.config.request_timeout,
             )
             self._initialized = True
             logger.info(f"VLM初始化: {self.config.model}")
