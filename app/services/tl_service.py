@@ -1863,7 +1863,20 @@ class TLService:
         category_id: int,
         names: List[str],
     ) -> Dict[str, Any]:
-        if not names:
+        norm: List[str] = []
+        seen: set = set()
+        for raw in names:
+            if raw is None:
+                continue
+            n = str(raw).strip()
+            if not n:
+                raise ValueError("品类名称列表中含空名称")
+            if len(n) > 50:
+                raise ValueError(f"品种名长度不能超过 50: {n!r}")
+            if n not in seen:
+                seen.add(n)
+                norm.append(n)
+        if not norm:
             raise ValueError("品类名称列表不能为空")
 
         try:
@@ -1874,6 +1887,15 @@ class TLService:
                             "SELECT COALESCE(MAX(category_id), 0) + 1 FROM dict_categories"
                         )
                         category_id = int(cur.fetchone()[0])
+                    else:
+                        # 整组替换：该分组下原启用、且不在本次提交列表中的别名一律软删除
+                        ph = ",".join(["%s"] * len(norm))
+                        cur.execute(
+                            f"UPDATE dict_categories SET is_active = 0 "
+                            f"WHERE category_id = %s AND is_active = 1 "
+                            f"AND name NOT IN ({ph})",
+                            (category_id,) + tuple(norm),
+                        )
 
                     # 将该 category_id 下所有旧记录的 is_main 置为 0
                     cur.execute(
@@ -1881,7 +1903,7 @@ class TLService:
                         (category_id,),
                     )
 
-                    for i, name in enumerate(names):
+                    for i, name in enumerate(norm):
                         is_main = 1 if i == 0 else 0
 
                         cur.execute(
