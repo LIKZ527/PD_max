@@ -39,6 +39,13 @@ class ComparisonRequest(BaseModel):
         None,
         description="明细与冶炼厂排行按该口径下的利润从高到低排序；须出现在最优价计税口径列表中；省略则用列表第一项",
     )
+    报价日期: Optional[str] = Field(
+        None,
+        description=(
+            "YYYY-MM-DD，可选。指定则只使用该日期的 quote_details；"
+            "省略则对每个冶炼厂+品种名取「比价日历日及以前」中 quote_date 最近的一条（见接口文档 QUOTE_COMPARISON_TZ）"
+        ),
+    )
 
     @field_validator("最优价计税口径列表", mode="after")
     @classmethod

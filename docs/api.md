@@ -190,7 +190,10 @@
 1. 报价表中直接有对应 `price_type` 的价格 → 直接使用，`报价来源: "direct"`
 2. 报价表有不含税基础价（`unit_price`）+ 该冶炼厂税率表有目标税率 → 正向换算，`报价来源: "calc_from_base"`
 3. 报价表有其他已知含税价 + 税率表有对应税率 → 先反算不含税价，再正向换算，`报价来源: "calc_from_3pct"` 等
-4. 以上均无 → `报价: null`，`报价来源: "unavailable"`
+4. **`price_type` 为普通价（不含税）时**：若仅有 `price_normal_invoice` / `price_reverse_invoice` 有值（无基准价与 1%/3%/13% 含税列），按 **不含税单价** 理解，与入库推算逻辑一致，`报价来源: "direct_price_normal_invoice"` / `"direct_price_reverse_invoice"`
+5. 以上均无 → `报价: null`，`报价来源: "unavailable"`
+
+**匹配说明**：比价按 `dict_categories` 中该品类的 **全部别名** 与 `quote_details.category_name` 关联；比较时对库中品种名做 **`TRIM` 去首尾空白**，避免 OCR/录入多空格导致整表 `unavailable`。
 
 - 模拟请求JSON：
 ```json

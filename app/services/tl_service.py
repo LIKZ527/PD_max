@@ -515,6 +515,7 @@ class TLService:
         tons: float = 1.0,
         optimal_basis_list: Optional[List[str]] = None,
         optimal_sort_basis: Optional[str] = None,
+        quote_date_str: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         price_type: 目标税率类型，None=普通价, 1pct/3pct/13pct/normal_invoice/reverse_invoice
@@ -534,8 +535,10 @@ class TLService:
           4. 仅有某一档含税价 → 先反算不含税，再换算到目标税率
           5. 以上均无 → None，返回 price_source="unavailable"
 
-        **报价日期**：仅使用「当天」`quote_details`（默认按 `Asia/Shanghai` 日历日，见 `QUOTE_COMPARISON_TZ`），
-        历史上传的其它日期不参与比价。
+        **报价日期**：
+        - 若传入 `quote_date_str`（YYYY-MM-DD）：只使用该日的 `quote_details`。
+        - 否则：对每个 (冶炼厂, 品种名) 取 **quote_date ≤ 比价日历日**（默认 `Asia/Shanghai`，见 `QUOTE_COMPARISON_TZ`）
+          的 **最近一条** 报价，避免「确认报价不是今天」时比价整表无单价。
         """
         if not warehouse_ids or not smelter_ids or not category_ids:
             return {
@@ -622,7 +625,12 @@ class TLService:
                     )
                     cat_id_to_names: Dict[int, List[str]] = {}
                     for cat_id, name in cur.fetchall():
-                        cat_id_to_names.setdefault(cat_id, []).append(name)
+                        n = str(name).strip()
+                        if not n:
+                            continue
+                        lst = cat_id_to_names.setdefault(cat_id, [])
+                        if n not in lst:
+                            lst.append(n)
 
                     if not cat_id_to_names:
                         return {
@@ -631,8 +639,14 @@ class TLService:
                             "最优价排序口径": sort_basis,
                         }
 
-                    # 所有品类名称（用于查询价格表）
-                    all_cat_names = [name for names in cat_id_to_names.values() for name in names]
+                    # 所有品类名称（去重，与 quote_details 用 TRIM 后匹配）
+                    all_cat_names: List[str] = []
+                    _seen_cn: set = set()
+                    for names in cat_id_to_names.values():
+                        for n in names:
+                            if n not in _seen_cn:
+                                _seen_cn.add(n)
+                                all_cat_names.append(n)
                     cn_ph = ",".join(["%s"] * len(all_cat_names))
 
                     # 税率表：{factory_id: {tax_type: rate}}
@@ -646,32 +660,66 @@ class TLService:
                     for fid, ttype, rate in cur.fetchall():
                         tax_rate_map.setdefault(fid, {})[ttype] = float(rate)
 
-                    # 仅「当天」报价（不按历史 MAX(quote_date)）；无当日行则该品类无报价
                     quote_day = _comparison_quote_calendar_date()
-                    cur.execute(
-                        f"""
-                        SELECT factory_id, category_name,
-                               unit_price, price_1pct_vat, price_3pct_vat, price_13pct_vat,
-                               price_normal_invoice, price_reverse_invoice
-                        FROM quote_details
-                        WHERE factory_id IN ({sm_ph})
-                          AND category_name IN ({cn_ph})
-                          AND quote_date = %s
-                        """,
-                        tuple(smelter_ids) + tuple(all_cat_names) + (quote_day,),
-                    )
+                    if quote_date_str is not None and str(quote_date_str).strip():
+                        try:
+                            exact_qd = date.fromisoformat(str(quote_date_str).strip())
+                        except (ValueError, TypeError):
+                            raise ValueError(
+                                f"报价日期 格式不正确: {quote_date_str}，应为 YYYY-MM-DD"
+                            )
+                        cur.execute(
+                            f"""
+                            SELECT factory_id, TRIM(category_name) AS category_name,
+                                   unit_price, price_1pct_vat, price_3pct_vat, price_13pct_vat,
+                                   price_normal_invoice, price_reverse_invoice
+                            FROM quote_details
+                            WHERE factory_id IN ({sm_ph})
+                              AND TRIM(category_name) IN ({cn_ph})
+                              AND quote_date = %s
+                            """,
+                            tuple(smelter_ids) + tuple(all_cat_names) + (exact_qd,),
+                        )
+                    else:
+                        cur.execute(
+                            f"""
+                            SELECT qd.factory_id, TRIM(qd.category_name) AS category_name,
+                                   qd.unit_price, qd.price_1pct_vat, qd.price_3pct_vat,
+                                   qd.price_13pct_vat,
+                                   qd.price_normal_invoice, qd.price_reverse_invoice
+                            FROM quote_details qd
+                            INNER JOIN (
+                                SELECT factory_id, TRIM(category_name) AS cname, MAX(quote_date) AS mx
+                                FROM quote_details
+                                WHERE factory_id IN ({sm_ph})
+                                  AND TRIM(category_name) IN ({cn_ph})
+                                  AND quote_date <= %s
+                                GROUP BY factory_id, TRIM(category_name)
+                            ) latest ON latest.factory_id = qd.factory_id
+                                AND TRIM(qd.category_name) = latest.cname
+                                AND latest.mx = qd.quote_date
+                            WHERE qd.factory_id IN ({sm_ph})
+                              AND TRIM(qd.category_name) IN ({cn_ph})
+                            """,
+                            tuple(smelter_ids)
+                            + tuple(all_cat_names)
+                            + (quote_day,)
+                            + tuple(smelter_ids)
+                            + tuple(all_cat_names),
+                        )
                     # raw_price_map: {(factory_id, category_name): {col: value}}
                     col_names = ["unit_price", "price_1pct_vat", "price_3pct_vat",
                                  "price_13pct_vat", "price_normal_invoice", "price_reverse_invoice"]
                     raw_price_map: Dict[tuple, Dict[str, Optional[float]]] = {}
                     name_to_cat_id: Dict[str, int] = {}
                     for row in cur.fetchall():
-                        fid_r, cat_name = row[0], row[1]
+                        fid_r, cat_name = row[0], str(row[1]).strip() if row[1] is not None else ""
+                        if not cat_name:
+                            continue
                         raw_price_map[(fid_r, cat_name)] = {
                             col: (float(v) if v is not None else None)
                             for col, v in zip(col_names, row[2:])
                         }
-                        # 建立品类名称到category_id的映射
                         for cat_id, names in cat_id_to_names.items():
                             if cat_name in names:
                                 name_to_cat_id[cat_name] = cat_id
@@ -694,7 +742,9 @@ class TLService:
                 cat_names = cat_id_to_names.get(cat_id, [])
                 for cat_name in cat_names:
                     prices = raw_price_map.get((fid, cat_name), {})
-                    if not prices:
+                    if not prices or not any(
+                        v is not None for v in prices.values()
+                    ):
                         continue
 
                     rates = tax_rate_map.get(fid, {})
@@ -718,6 +768,11 @@ class TLService:
                             if known_price is not None and src_tax in merged:
                                 net = net_from_inclusive(float(known_price), merged[src_tax])
                                 return round(net, 2), f"calc_from_{src_tax}"
+                        # 与 derive_net_and_vat_from_quote_row 一致：仅有普票/反向发票列时按不含税理解
+                        for col in ("price_normal_invoice", "price_reverse_invoice"):
+                            v = prices.get(col)
+                            if v is not None:
+                                return float(v), f"direct_{col}"
 
                     # 4. 从某一档含税价反算不含税，再换算到目标税率
                     if target_tax and target_tax in merged:

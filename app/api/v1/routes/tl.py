@@ -239,6 +239,7 @@ def get_comparison(
             tons=body.吨数,
             optimal_basis_list=body.最优价计税口径列表,
             optimal_sort_basis=body.最优价排序口径,
+            quote_date_str=body.报价日期,
         )
         return {
             "code": 200,
