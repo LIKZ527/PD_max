@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 OPTIMAL_PRICE_BASIS_ALLOWED = frozenset(
     {"base", "1pct", "3pct", "13pct", "normal_invoice", "reverse_invoice"}
@@ -25,12 +25,7 @@ class ComparisonRequest(BaseModel):
     吨数: float = Field(
         1.0,
         gt=0,
-        description="货物吨数；车数=max(1, ⌈吨数/每车吨数⌉)；总运费=车数×每车运费（元/车）",
-    )
-    每车吨数: float = Field(
-        35.0,
-        gt=0,
-        description="单车核定吨数；用于由吨数推算车数；总运费=每车运费×车数（运费表数值按元/车解释）",
+        description="货物吨数；总运费=freight_rates 每吨运费（元/吨）×吨数",
     )
     最优价计税口径列表: List[str] = Field(
         default_factory=lambda: ["3pct"],
@@ -43,6 +38,13 @@ class ComparisonRequest(BaseModel):
     最优价排序口径: Optional[str] = Field(
         None,
         description="明细与冶炼厂排行按该口径下的利润从高到低排序；须出现在最优价计税口径列表中；省略则用列表第一项",
+    )
+    报价日期: Optional[str] = Field(
+        None,
+        description=(
+            "YYYY-MM-DD，可选。指定则只使用该日期的 quote_details；"
+            "省略则对每个冶炼厂+品种名取「比价日历日及以前」中 quote_date 最近的一条（见接口文档 QUOTE_COMPARISON_TZ）"
+        ),
     )
 
     @field_validator("最优价计税口径列表", mode="after")
@@ -126,14 +128,108 @@ class UpdateFreightRequest(BaseModel):
 
 class CategoryMappingItem(BaseModel):
     """接口7 单条品类映射"""
-    品类id: int = Field(..., description="品类分组ID")
-    品类名称: List[str] = Field(..., description="品类名称列表，第一个为主名称")
+
+    model_config = ConfigDict(extra="ignore")
+
+    品类id: int = Field(
+        ...,
+        validation_alias=AliasChoices("品类id", "品类ID", "category_id"),
+        description="品类分组ID",
+    )
+    品类名称: List[str] = Field(
+        ...,
+        min_length=1,
+        validation_alias=AliasChoices("品类名称", "names", "aliasNames"),
+        description=(
+            "名称列表：默认（整组替换）时第一项为主名称，其余为别名；"
+            "当 仅追加别名=true 时只填待追加的别名即可，勿再传主名称（主名称沿用库中已有）；"
+            "也可传单个字符串，会自动当作单元素列表"
+        ),
+    )
+    仅追加别名: bool = Field(
+        False,
+        validation_alias=AliasChoices(
+            "仅追加别名",
+            "append_only",
+            "appendOnly",
+            "append_aliases",
+            "appendAliases",
+        ),
+        description=(
+            "false（默认）：提交列表为该分组最终别名集，未出现在列表中的原启用别名将软删除；"
+            "true：在保留该分组已有启用别名的前提下合并列表中的名称（去重）；"
+            "此时 品类名称 只写要追加的别名；若分组已有启用行，新插入的名称不会成为主名称"
+        ),
+    )
+
+    @field_validator("品类名称", mode="before")
+    @classmethod
+    def _coerce_category_names(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            t = v.strip()
+            return [t] if t else []
+        if isinstance(v, (int, float)):
+            return [str(v).strip()]
+        return v
 
 
 class UpdateCategoryMappingRequest(BaseModel):
-    """接口7 请求体"""
-    品类id: int = Field(..., description="品类分组ID")
-    品类名称: List[str] = Field(..., description="品类名称列表，第一个为主名称")
+    """接口7 请求体（与 CategoryMappingItem 字段一致，单条 JSON 时使用）"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    品类id: int = Field(
+        ...,
+        validation_alias=AliasChoices("品类id", "品类ID", "category_id"),
+    )
+    品类名称: List[str] = Field(
+        ...,
+        min_length=1,
+        validation_alias=AliasChoices("品类名称", "names", "aliasNames"),
+    )
+    仅追加别名: bool = Field(
+        False,
+        validation_alias=AliasChoices(
+            "仅追加别名",
+            "append_only",
+            "appendOnly",
+            "append_aliases",
+            "appendAliases",
+        ),
+    )
+
+    @field_validator("品类名称", mode="before")
+    @classmethod
+    def _coerce_category_names_single(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            t = v.strip()
+            return [t] if t else []
+        if isinstance(v, (int, float)):
+            return [str(v).strip()]
+        return v
+
+
+class UpdateCategoryRowRequest(BaseModel):
+    """按 dict_categories.row_id 修改单条别名（名称或主名称）"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    行id: int = Field(..., ge=1, description="dict_categories 主键 row_id，见 get_category_mapping 别名行")
+    品种名: Optional[str] = Field(
+        None,
+        description="新名称；传入则改名，并同步 quote_details 中历史 category_name",
+    )
+    设为主名称: Optional[bool] = Field(
+        None,
+        description="传 true 将该别名设为该品类组的主名称（is_main=1，同组其余为0）",
+    )
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> "UpdateCategoryRowRequest":
+        has_name = self.品种名 is not None and str(self.品种名).strip() != ""
+        if has_name or self.设为主名称 is True:
+            return self
+        raise ValueError("至少需要提供非空的 品种名，或将 设为主名称 设为 true")
 
 
 class VlmPriceRow(BaseModel):
