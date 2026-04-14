@@ -1269,15 +1269,21 @@ class TLService:
                                 )
                                 item["冶炼厂id"] = cur.lastrowid
 
-                        # 2. 品类不存在则新建到 dict_categories
+                        # 2. 品类：与 upload_variety 一致——按 name 全局唯一；停用行需恢复而非再 INSERT
                         cat_name = item["品类名"]
                         cur.execute(
-                            "SELECT category_id FROM dict_categories WHERE name = %s AND is_active = 1",
+                            "SELECT row_id, is_active FROM dict_categories WHERE name = %s",
                             (cat_name,),
                         )
                         row = cur.fetchone()
-                        if not row:
-                            # 新建品类，分配新的 category_id
+                        if row:
+                            _rid, is_active = row
+                            if is_active != 1:
+                                cur.execute(
+                                    "UPDATE dict_categories SET is_active = 1 WHERE row_id = %s",
+                                    (_rid,),
+                                )
+                        else:
                             cur.execute("SELECT COALESCE(MAX(category_id), 0) + 1 FROM dict_categories")
                             new_cat_id = cur.fetchone()[0]
                             cur.execute(
