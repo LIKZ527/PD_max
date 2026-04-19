@@ -110,15 +110,21 @@ TABLE_STATEMENTS = [
     CREATE TABLE IF NOT EXISTS dict_warehouses (
         id INT AUTO_INCREMENT PRIMARY KEY COMMENT '仓库ID',
         name VARCHAR(100) NOT NULL UNIQUE COMMENT '仓库名称',
-        address VARCHAR(500) DEFAULT NULL COMMENT '地址',
+        province VARCHAR(64) DEFAULT NULL COMMENT '省',
+        city VARCHAR(64) DEFAULT NULL COMMENT '市',
+        district VARCHAR(64) DEFAULT NULL COMMENT '区县',
+        address VARCHAR(500) DEFAULT NULL COMMENT '详细地址',
         warehouse_type_id INT DEFAULT NULL COMMENT '库房类型ID（类型颜色见 dict_warehouse_types）',
         color_config JSON DEFAULT NULL COMMENT '仓库独立颜色配置（JSON），可与库房类型颜色并存',
+        longitude DECIMAL(11, 8) DEFAULT NULL COMMENT '经度',
+        latitude DECIMAL(10, 8) DEFAULT NULL COMMENT '纬度',
         is_active TINYINT(1) DEFAULT 1 COMMENT '是否启用',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         CONSTRAINT fk_wh_warehouse_type FOREIGN KEY (warehouse_type_id)
             REFERENCES dict_warehouse_types (id) ON UPDATE CASCADE ON DELETE SET NULL,
-        INDEX idx_wh_warehouse_type (warehouse_type_id)
+        INDEX idx_wh_warehouse_type (warehouse_type_id),
+        INDEX idx_wh_geo_region (province, city, district)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='仓库字典表';
     """,
     # 冶炼厂字典表
@@ -126,10 +132,17 @@ TABLE_STATEMENTS = [
     CREATE TABLE IF NOT EXISTS dict_factories (
         id INT AUTO_INCREMENT PRIMARY KEY COMMENT '冶炼厂ID',
         name VARCHAR(100) NOT NULL UNIQUE COMMENT '冶炼厂名称',
+        province VARCHAR(64) DEFAULT NULL COMMENT '省',
+        city VARCHAR(64) DEFAULT NULL COMMENT '市',
+        district VARCHAR(64) DEFAULT NULL COMMENT '区县',
         address VARCHAR(500) DEFAULT NULL COMMENT '冶炼厂地址',
+        color_config JSON DEFAULT NULL COMMENT '标记颜色等 JSON',
+        longitude DECIMAL(11, 8) DEFAULT NULL COMMENT '经度',
+        latitude DECIMAL(10, 8) DEFAULT NULL COMMENT '纬度',
         is_active TINYINT(1) DEFAULT 1 COMMENT '是否启用',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_df_geo_region (province, city, district)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='冶炼厂字典表';
     """,
     # 运费价格表
@@ -658,6 +671,106 @@ def ensure_dict_factories_address_column() -> None:
         connection.close()
 
 
+def ensure_dict_warehouses_geo_region_columns() -> None:
+    """省市区与经纬度（REST 仓库接口与天地图落库）。"""
+    config_dict = get_mysql_config()
+    connection = pymysql.connect(**config_dict)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SHOW TABLES LIKE 'dict_warehouses'")
+            if cursor.fetchone() is None:
+                return
+
+            def _has_col(col: str) -> bool:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() AND table_name = 'dict_warehouses' "
+                    "AND column_name = %s",
+                    (col,),
+                )
+                return cursor.fetchone()[0] > 0
+
+            specs = [
+                ("province", "province VARCHAR(64) DEFAULT NULL COMMENT '省'"),
+                ("city", "city VARCHAR(64) DEFAULT NULL COMMENT '市'"),
+                ("district", "district VARCHAR(64) DEFAULT NULL COMMENT '区县'"),
+                (
+                    "longitude",
+                    "longitude DECIMAL(11, 8) DEFAULT NULL COMMENT '经度'",
+                ),
+                (
+                    "latitude",
+                    "latitude DECIMAL(10, 8) DEFAULT NULL COMMENT '纬度'",
+                ),
+            ]
+            for col, frag in specs:
+                if not _has_col(col):
+                    cursor.execute(f"ALTER TABLE dict_warehouses ADD COLUMN {frag}")
+                    logger.info("已为 dict_warehouses 添加列 %s", col)
+            try:
+                cursor.execute(
+                    "CREATE INDEX idx_wh_geo_region ON dict_warehouses "
+                    "(province, city, district)"
+                )
+            except Exception:
+                pass
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def ensure_dict_factories_geo_region_columns() -> None:
+    """冶炼厂省市区、颜色、经纬度（与仓库一致，供天地图落库）。"""
+    config_dict = get_mysql_config()
+    connection = pymysql.connect(**config_dict)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SHOW TABLES LIKE 'dict_factories'")
+            if cursor.fetchone() is None:
+                return
+
+            def _has_col(col: str) -> bool:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE table_schema = DATABASE() AND table_name = 'dict_factories' "
+                    "AND column_name = %s",
+                    (col,),
+                )
+                return cursor.fetchone()[0] > 0
+
+            specs = [
+                ("province", "province VARCHAR(64) DEFAULT NULL COMMENT '省'"),
+                ("city", "city VARCHAR(64) DEFAULT NULL COMMENT '市'"),
+                ("district", "district VARCHAR(64) DEFAULT NULL COMMENT '区县'"),
+                (
+                    "color_config",
+                    "color_config JSON DEFAULT NULL COMMENT '标记颜色等 JSON'",
+                ),
+                (
+                    "longitude",
+                    "longitude DECIMAL(11, 8) DEFAULT NULL COMMENT '经度'",
+                ),
+                (
+                    "latitude",
+                    "latitude DECIMAL(10, 8) DEFAULT NULL COMMENT '纬度'",
+                ),
+            ]
+            for col, frag in specs:
+                if not _has_col(col):
+                    cursor.execute(f"ALTER TABLE dict_factories ADD COLUMN {frag}")
+                    logger.info("已为 dict_factories 添加列 %s", col)
+            try:
+                cursor.execute(
+                    "CREATE INDEX idx_df_geo_region ON dict_factories "
+                    "(province, city, district)"
+                )
+            except Exception:
+                pass
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def ensure_ai_detection_history_stored_image_column() -> None:
     """已有库升级：为 ai_detection_history 增加 stored_image（新建库已由 CREATE TABLE 包含）。"""
     config_dict = get_mysql_config()
@@ -724,6 +837,14 @@ def create_tables() -> None:
         ensure_dict_factories_address_column()
     except Exception:
         logger.exception("检查/添加 dict_factories.address 失败")
+    try:
+        ensure_dict_warehouses_geo_region_columns()
+    except Exception:
+        logger.exception("检查/添加 dict_warehouses 省市区与经纬度失败")
+    try:
+        ensure_dict_factories_geo_region_columns()
+    except Exception:
+        logger.exception("检查/添加 dict_factories 省市区与经纬度失败")
 
 
 def init_default_data() -> None:
