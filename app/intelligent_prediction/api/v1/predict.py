@@ -1,4 +1,4 @@
-﻿"""预测 HTTP 接口。"""
+"""预测 HTTP 接口。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,10 @@ from app.intelligent_prediction.api.deps import get_prediction_db_session, get_p
 from app.intelligent_prediction.models import PredictionBatch
 from app.intelligent_prediction.models import PredictionResult as PredictionResultRow
 from app.intelligent_prediction.schemas.audit import OperationAuditItem, OperationAuditListResponse
+from app.intelligent_prediction.schemas.dict_addresses import (
+    TlDictEntityAddress,
+    WarehouseSmelterAddressLookupResponse,
+)
 from app.intelligent_prediction.schemas.prediction import (
     AsyncPredictionAccepted,
     BatchPredictionRequest,
@@ -29,11 +33,35 @@ from app.intelligent_prediction.schemas.prediction import (
     StoredPredictionResultListResponse,
 )
 from app.intelligent_prediction.services.audit_service import list_audit_events
+from app.intelligent_prediction.services.dict_geo_lookup import (
+    lookup_warehouse_smelter_dict_addresses,
+)
 from app.intelligent_prediction.services.prediction_service import PredictionService
 from app.intelligent_prediction.tasks.export_tasks import run_prediction_batch_task
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+@router.get(
+    "/dict-addresses",
+    response_model=WarehouseSmelterAddressLookupResponse,
+    summary="查询仓库与冶炼厂地址（TL 字典）",
+    description=(
+        "按名称从主库 ``dict_warehouses``、``dict_factories`` 解析省市区、详址与经纬度；"
+        "名称匹配规则与送货历史导入时的地理解析一致（精确 → 去空白等 → 模糊择优）。"
+    ),
+)
+def get_warehouse_smelter_dict_addresses(
+    warehouse: str = Query(..., min_length=1, description="仓库名称"),
+    smelter: str | None = Query(None, description="冶炼厂名称（可选）"),
+) -> WarehouseSmelterAddressLookupResponse:
+    sn = smelter.strip() if smelter and smelter.strip() else None
+    wh_raw, sm_raw = lookup_warehouse_smelter_dict_addresses(warehouse.strip(), sn)
+    return WarehouseSmelterAddressLookupResponse(
+        warehouse=TlDictEntityAddress.model_validate(wh_raw) if wh_raw else None,
+        smelter=TlDictEntityAddress.model_validate(sm_raw) if sm_raw else None,
+    )
 
 
 @router.get(
