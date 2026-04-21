@@ -65,7 +65,7 @@ def get_warehouse_smelter_dict_addresses(
 
 
 @router.get(
-    "/操作审计",
+    "/operation-audit",
     response_model=OperationAuditListResponse,
     summary="分页查询智能预测操作审计",
     description="追溯导入、删除、导出、单条历史修改、定时预测等操作（何人、何时、何事）。",
@@ -122,7 +122,7 @@ async def predict_sync(
 
 
 @router.post(
-    "/异步",
+    "/async",
     response_model=AsyncPredictionAccepted,
     summary="异步批量预测",
     description="创建预测批次并入队 Celery，返回任务编号与批次编号。",
@@ -167,7 +167,7 @@ async def predict_async(
 
 
 @router.get(
-    "/结果",
+    "/results",
     response_model=StoredPredictionResultListResponse,
     summary="分页查询预测结果",
     description="查询已落库的预测明细，支持按仓库、品种、冶炼厂、区域经理、批次、目标日期筛选。",
@@ -227,7 +227,7 @@ async def list_stored_prediction_results(
 
 
 @router.get(
-    "/批次/{predict_id}",
+    "/batches/{predict_id}",
     response_model=BatchStatusResponse,
     summary="查询异步批次状态",
     description="根据批次 UUID 查询处理状态、结果条数、导出文件是否就绪等。",
@@ -261,7 +261,7 @@ async def get_batch_status(
 
 
 @router.get(
-    "/批次/{predict_id}/下载",
+    "/batches/{predict_id}/download",
     summary="下载批次导出 Excel",
     description="异步任务生成导出文件后，通过本接口下载对应 xlsx。",
 )
