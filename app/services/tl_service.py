@@ -1192,11 +1192,115 @@ class TLService:
             logger.error(f"删除冶炼厂失败: {e}")
             raise
 
-    def purge_smelter(self, smelter_id: int) -> Dict[str, Any]:
-        """从 dict_factories 物理删除；存在外键引用时失败。"""
+    def purge_smelter(self, smelter_id: int, *, cascade: bool = False) -> Dict[str, Any]:
+        """从 dict_factories 物理删除。
+
+        cascade=False（默认）：若 freight_rates / quote_details 等仍引用该行，则失败（与库外键一致）。
+        cascade=True：在同一事务内按依赖顺序删除需求明细、需求主表、报价明细、报价元数据、运费、税率（随厂级联），再删除冶炼厂。
+        """
         if smelter_id < 1:
             raise ValueError("冶炼厂 id 无效")
         try:
+            if cascade:
+                with get_conn() as conn:
+                    conn.autocommit(False)
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT id, name FROM dict_factories WHERE id = %s",
+                                (smelter_id,),
+                            )
+                            row = cur.fetchone()
+                            if not row:
+                                raise ValueError(f"冶炼厂 id={smelter_id} 不存在")
+                            factory_name = str(row[1])
+                            cur.execute(
+                                """
+                                SELECT
+                                  (SELECT COUNT(*) FROM factory_demand_items fdi
+                                     INNER JOIN factory_demands fd ON fd.id = fdi.demand_id
+                                     WHERE fd.factory_id = %s),
+                                  (SELECT COUNT(*) FROM factory_demands WHERE factory_id = %s),
+                                  (SELECT COUNT(*) FROM quote_details WHERE factory_id = %s),
+                                  (SELECT COUNT(*) FROM quote_table_metadata WHERE factory_id = %s),
+                                  (SELECT COUNT(*) FROM freight_rates WHERE factory_id = %s),
+                                  (SELECT COUNT(*) FROM factory_tax_rates WHERE factory_id = %s)
+                                """,
+                                (smelter_id,) * 6,
+                            )
+                            c_row = cur.fetchone()
+                            n_di, n_dm, n_qd, n_qm, n_fr, n_tr = (
+                                int(c_row[0] or 0),
+                                int(c_row[1] or 0),
+                                int(c_row[2] or 0),
+                                int(c_row[3] or 0),
+                                int(c_row[4] or 0),
+                                int(c_row[5] or 0),
+                            )
+
+                            cur.execute(
+                                """
+                                DELETE fdi FROM factory_demand_items fdi
+                                INNER JOIN factory_demands fd ON fd.id = fdi.demand_id
+                                WHERE fd.factory_id = %s
+                                """,
+                                (smelter_id,),
+                            )
+                            cur.execute(
+                                "DELETE FROM factory_demands WHERE factory_id = %s",
+                                (smelter_id,),
+                            )
+                            cur.execute(
+                                "DELETE FROM quote_details WHERE factory_id = %s",
+                                (smelter_id,),
+                            )
+                            cur.execute(
+                                "DELETE FROM quote_table_metadata WHERE factory_id = %s",
+                                (smelter_id,),
+                            )
+                            cur.execute(
+                                "DELETE FROM freight_rates WHERE factory_id = %s",
+                                (smelter_id,),
+                            )
+                            cur.execute(
+                                "DELETE FROM dict_factories WHERE id = %s",
+                                (smelter_id,),
+                            )
+                            if cur.rowcount == 0:
+                                raise ValueError(f"冶炼厂 id={smelter_id} 删除失败")
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+
+                log_finance_event(
+                    "冶炼厂硬删除(级联) | id=%s name=%s | 删 demand_items=%s demands=%s "
+                    "quote_details=%s quote_metadata=%s freight_rates=%s tax_rates(删厂前)=%s",
+                    smelter_id,
+                    factory_name,
+                    n_di,
+                    n_dm,
+                    n_qd,
+                    n_qm,
+                    n_fr,
+                    n_tr,
+                )
+                return {
+                    "code": 200,
+                    "msg": (
+                        f"已级联永久删除冶炼厂 id={smelter_id}（含关联运费/报价等，详见 deleted_counts）"
+                    ),
+                    "cascade": True,
+                    "deleted_counts": {
+                        "factory_demand_items": n_di,
+                        "factory_demands": n_dm,
+                        "quote_details": n_qd,
+                        "quote_table_metadata": n_qm,
+                        "freight_rates": n_fr,
+                        "factory_tax_rates": n_tr,
+                    },
+                }
+
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -1213,10 +1317,11 @@ class TLService:
                     except PyMySQLIntegrityError as e:
                         logger.warning("硬删除冶炼厂触发外键约束: %s", e)
                         raise ValueError(
-                            "该冶炼厂仍被运费、报价或其它业务数据引用，无法物理删除；"
-                            "请先解除关联或使用软删除接口"
+                            "该冶炼厂仍被运费、报价或其它业务数据引用，无法物理删除。"
+                            "可调用 DELETE /tl/purge_smelter?cascade=true 级联删除关联数据后再删厂，"
+                            "或先手工清理 freight_rates / quote_details 等表后重试；也可使用软删除接口。"
                         ) from e
-            return {"code": 200, "msg": "冶炼厂已永久删除"}
+            return {"code": 200, "msg": "冶炼厂已永久删除", "cascade": False}
         except ValueError:
             raise
         except Exception as e:
