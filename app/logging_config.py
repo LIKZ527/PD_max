@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from app.paths import PROJECT_ROOT
+from app.request_context import get_request_operator_label
 
 # 避免用「root 是否已有 handlers」判断：其它库或运行环境可能先挂过 handler（甚至 NullHandler），
 # 会导致此处直接 return，应用侧 StreamHandler 从未添加，表现为「没有任何业务日志」。
@@ -17,11 +18,21 @@ def _short_logger_name(name: str) -> str:
     return n.rsplit(".", 1)[-1]
 
 
+class _RequestContextFilter(logging.Filter):
+    """为每条日志注入当前请求的操作人（无请求或非 Bearer 时为 '-'）。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.operator = get_request_operator_label()
+        return True
+
+
 class _CompactFormatter(logging.Formatter):
-    """asctime 不含毫秒；每条：时间 级别 短logger名 消息。"""
+    """asctime 不含毫秒；每条：时间 级别 操作人 短logger名 消息。"""
 
     def format(self, record: logging.LogRecord) -> str:
         record.log_short = _short_logger_name(record.name)
+        if not hasattr(record, "operator"):
+            record.operator = get_request_operator_label()
         return super().format(record)
 
 
@@ -60,6 +71,22 @@ def _resolve_log_file_path() -> str:
     return ""
 
 
+def _resolve_finance_log_file_path(main_log_file: str) -> str:
+    """金额/税率/运费/报价变更审计文件；默认与主日志同目录下的 pd-max-finance.log。"""
+    explicit = os.getenv("LOG_FINANCE_FILE", "").strip()
+    if explicit:
+        p = Path(explicit)
+        return str(p if p.is_absolute() else (PROJECT_ROOT / p))
+    if main_log_file:
+        return str(Path(main_log_file).parent / "pd-max-finance.log")
+    if _env_flag("LOG_ENABLE_FINANCE_FILE", default=False):
+        log_dir = (os.getenv("LOG_DIR") or "logs").strip() or "logs"
+        d = Path(log_dir)
+        base = d if d.is_absolute() else (PROJECT_ROOT / d)
+        return str(base / "pd-max-finance.log")
+    return ""
+
+
 def setup_logging() -> None:
     """初始化项目日志：handlers 只装一次；LOG_LEVEL 每次生效（便于 reload 后读 .env）。"""
     global _handlers_installed
@@ -70,14 +97,16 @@ def setup_logging() -> None:
     if _handlers_installed:
         return
 
+    ctx_filter = _RequestContextFilter()
     formatter = _CompactFormatter(
-        fmt="%(asctime)s %(levelname)s %(log_short)s %(message)s",
+        fmt="%(asctime)s %(levelname)s %(operator)s %(log_short)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     if _env_flag("LOG_ENABLE_CONSOLE", default=True):
         stream_handler = logging.StreamHandler(sys.stderr)
         stream_handler.setFormatter(formatter)
+        stream_handler.addFilter(ctx_filter)
         root_logger.addHandler(stream_handler)
 
     log_file = _resolve_log_file_path()
@@ -91,12 +120,40 @@ def setup_logging() -> None:
             encoding="utf-8",
         )
         file_handler.setFormatter(formatter)
+        file_handler.addFilter(ctx_filter)
         root_logger.addHandler(file_handler)
 
     if not root_logger.handlers:
         stream_handler = logging.StreamHandler(sys.stderr)
         stream_handler.setFormatter(formatter)
+        stream_handler.addFilter(ctx_filter)
         root_logger.addHandler(stream_handler)
+
+    finance_logger = logging.getLogger("app.finance_audit")
+    finance_logger.setLevel(logging.INFO)
+    finance_logger.propagate = False
+    finance_fmt = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s %(operator)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    finance_path = _resolve_finance_log_file_path(log_file)
+    if finance_path:
+        fp = Path(finance_path)
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        finance_handler = logging.handlers.RotatingFileHandler(
+            fp,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        finance_handler.setFormatter(finance_fmt)
+        finance_handler.addFilter(ctx_filter)
+        finance_logger.addHandler(finance_handler)
+    elif _env_flag("LOG_ENABLE_CONSOLE", default=True):
+        finance_stream = logging.StreamHandler(sys.stderr)
+        finance_stream.setFormatter(finance_fmt)
+        finance_stream.addFilter(ctx_filter)
+        finance_logger.addHandler(finance_stream)
 
     _handlers_installed = True
 
@@ -107,7 +164,8 @@ def setup_logging() -> None:
 
     cfg = logging.getLogger(__name__)
     cfg.info(
-        "日志就绪 console=%s file=%s",
+        "日志就绪 console=%s file=%s finance_file=%s",
         _env_flag("LOG_ENABLE_CONSOLE", default=True),
         log_file or "-",
+        finance_path or "-",
     )

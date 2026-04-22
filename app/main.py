@@ -11,6 +11,7 @@ from app.api.v1.router import api_router
 from app.database import create_tables, init_default_data
 from app.logging_config import setup_logging
 from app.intelligent_prediction.exceptions import BusinessException
+from app.request_context import bind_operator_context, reset_operator_context
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -54,29 +55,34 @@ async def log_http_requests(request: Request, call_next):
     if request.url.query:
         path = f"{path}?{request.url.query}"
 
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    op_token = bind_operator_context(auth)
     try:
-        response = await call_next(request)
-    except Exception:
+        try:
+            response = await call_next(request)
+        except Exception:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            access_logger.exception(
+                "%s %s 500 %.0fms %s",
+                request.method,
+                path,
+                elapsed_ms,
+                client_host,
+            )
+            raise
+
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        access_logger.exception(
-            "%s %s 500 %.0fms %s",
+        access_logger.info(
+            "%s %s %s %.0fms %s",
             request.method,
             path,
+            response.status_code,
             elapsed_ms,
             client_host,
         )
-        raise
-
-    elapsed_ms = (time.perf_counter() - start_time) * 1000
-    access_logger.info(
-        "%s %s %s %.0fms %s",
-        request.method,
-        path,
-        response.status_code,
-        elapsed_ms,
-        client_host,
-    )
-    return response
+        return response
+    finally:
+        reset_operator_context(op_token)
 
 
 @app.on_event("startup")

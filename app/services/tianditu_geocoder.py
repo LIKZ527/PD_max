@@ -44,11 +44,15 @@ def geocode_region_address(
     district: str,
     address: str,
     *,
-    timeout: float = 15.0,
+    timeout: Optional[float] = None,
 ) -> Tuple[float, float]:
     """
     调用天地图 geocoder 接口，返回 (经度, 纬度)。
+    timeout：秒；不传则使用 config.MAP_GEOCODER_TIMEOUT（环境变量 MAP_GEOCODER_TIMEOUT，默认 20）。
     """
+    effective_timeout = (
+        float(timeout) if timeout is not None else float(config.MAP_GEOCODER_TIMEOUT)
+    )
     key = (config.MAP_API_KEY or "").strip()
     if not key:
         raise GeocoderError("未配置 MAP_API_KEY，无法调用天地图")
@@ -76,7 +80,7 @@ def geocode_region_address(
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         logger.warning("天地图 HTTP 错误: %s", e)
@@ -90,6 +94,13 @@ def geocode_region_address(
     except urllib.error.URLError as e:
         logger.warning("天地图网络错误: %s", e)
         raise GeocoderError("无法连接天地图服务") from e
+    except TimeoutError as e:
+        logger.warning(
+            "天地图请求超时 timeout=%ss keyWord前80字=%r",
+            effective_timeout,
+            key_word[:80],
+        )
+        raise GeocoderError(f"天地图请求超时（{effective_timeout:g}s）") from e
     except Exception as e:
         logger.exception("天地图请求异常")
         raise GeocoderError("地理编码请求失败") from e

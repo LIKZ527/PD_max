@@ -18,6 +18,7 @@ from pymysql.err import IntegrityError as PyMySQLIntegrityError
 
 from app.config import UPLOAD_DIR
 from app.database import get_conn
+from app.finance_log import log_finance_event
 from app.models.tl import OPTIMAL_PRICE_BASIS_ALLOWED
 from app.quote_price_sources import (
     API_KEY_TO_DB,
@@ -1848,6 +1849,22 @@ class TLService:
                             "updated_at = CURRENT_TIMESTAMP",
                             (item["factory_id"], item["tax_type"], item["tax_rate"]),
                         )
+            log_finance_event(
+                "税率变更 | 保存条数=%s | 冶炼厂ids=%s | 明细=%s",
+                len(items),
+                sorted({int(i["factory_id"]) for i in items}),
+                json.dumps(
+                    [
+                        {
+                            "factory_id": i["factory_id"],
+                            "tax_type": i["tax_type"],
+                            "tax_rate": i["tax_rate"],
+                        }
+                        for i in items
+                    ],
+                    ensure_ascii=False,
+                ),
+            )
             return {"code": 200, "msg": f"已保存 {len(items)} 条税率记录"}
         except ValueError:
             raise
@@ -1866,6 +1883,11 @@ class TLService:
                     )
                     if cur.rowcount == 0:
                         raise ValueError(f"未找到 factory_id={factory_id}, tax_type={tax_type} 的记录")
+            log_finance_event(
+                "税率删除 | factory_id=%s tax_type=%s",
+                factory_id,
+                tax_type,
+            )
             return {"code": 200, "msg": "删除成功"}
         except ValueError:
             raise
@@ -2294,6 +2316,14 @@ class TLService:
                             }
                         )
 
+            log_finance_event(
+                "报价确认写入 | 报价日期=%s | 新增=%s | 更新=%s | 条目数=%s | 冶炼厂ids=%s",
+                quote_date_str,
+                inserted,
+                updated,
+                len(items),
+                sorted({int(i["冶炼厂id"]) for i in items}),
+            )
             return {
                 "code": 200,
                 "msg": f"写入成功：新增 {inserted} 条，更新 {updated} 条",
@@ -2310,9 +2340,9 @@ class TLService:
 
     def upload_freight(self, freight_list: List[Dict[str, Any]]) -> Dict[str, Any]:
         try:
+            today = date.today().isoformat()
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    today = date.today().isoformat()
                     for item in freight_list:
                         warehouse_name = item["仓库"]
                         smelter_name = item["冶炼厂"]
@@ -2343,6 +2373,11 @@ class TLService:
                             "updated_at = CURRENT_TIMESTAMP",
                             (sm_row[0], wh_row[0], freight, today),
                         )
+            log_finance_event(
+                "运费上传(JSON) | 条数=%s | 生效日期=%s",
+                len(freight_list),
+                today,
+            )
             return {"code": 200, "msg": "运费数据已存入数据库"}
 
         except ValueError:
@@ -2564,6 +2599,16 @@ class TLService:
                 extra.append(f"冶炼厂新建 {stats['new_fa']}、恢复启用 {stats['re_fa']}")
             if extra:
                 msg += "；" + "；".join(extra)
+            log_finance_event(
+                "运费Excel导入 | 生效日期=%s | 写入条数=%s | 新建库房=%s 恢复库房=%s | 新建冶炼厂=%s 恢复冶炼厂=%s | 错误条数=%s",
+                today,
+                written,
+                stats["new_wh"],
+                stats["re_wh"],
+                stats["new_fa"],
+                stats["re_fa"],
+                len(errors),
+            )
             return {
                 "code": 200,
                 "msg": msg,
@@ -2805,7 +2850,7 @@ class TLService:
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT factory_id, warehouse_id, effective_date "
+                        "SELECT factory_id, warehouse_id, effective_date, price_per_ton "
                         "FROM freight_rates WHERE id = %s",
                         (freight_id,),
                     )
@@ -2813,6 +2858,7 @@ class TLService:
                     if not row:
                         raise ValueError(f"运费记录不存在: id={freight_id}")
                     factory_id, warehouse_id, current_ed = int(row[0]), int(row[1]), row[2]
+                    old_price_per_ton = float(row[3])
                     if isinstance(current_ed, datetime):
                         current_ed = current_ed.date()
 
@@ -2838,6 +2884,16 @@ class TLService:
                     if cur.rowcount == 0:
                         raise ValueError(f"更新失败: id={freight_id}")
 
+            log_finance_event(
+                "运费修改 | id=%s factory_id=%s warehouse_id=%s 原单价=%s 新单价=%s 原生效日=%s 新生效日=%s",
+                freight_id,
+                factory_id,
+                warehouse_id,
+                old_price_per_ton,
+                price_per_ton,
+                current_ed.isoformat() if hasattr(current_ed, "isoformat") else current_ed,
+                target_ed.isoformat() if hasattr(target_ed, "isoformat") else target_ed,
+            )
             return {"code": 200, "msg": "运费已更新"}
         except ValueError:
             raise
@@ -2854,9 +2910,34 @@ class TLService:
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT fr.id, fr.factory_id, fr.warehouse_id, fr.price_per_ton, "
+                        "fr.effective_date, df.name AS smelter_name, dw.name AS warehouse_name "
+                        "FROM freight_rates fr "
+                        "INNER JOIN dict_factories df ON df.id = fr.factory_id "
+                        "INNER JOIN dict_warehouses dw ON dw.id = fr.warehouse_id "
+                        "WHERE fr.id = %s",
+                        (freight_id,),
+                    )
+                    snap = cur.fetchone()
+                    if not snap:
+                        raise ValueError(f"运费记录不存在: id={freight_id}")
+                    _id, _fid, _wid, old_price, eff_d, sm_name, wh_name = snap
+                    if isinstance(eff_d, datetime):
+                        eff_d = eff_d.date()
                     cur.execute("DELETE FROM freight_rates WHERE id = %s", (freight_id,))
                     if cur.rowcount == 0:
                         raise ValueError(f"运费记录不存在: id={freight_id}")
+            log_finance_event(
+                "运费删除 | id=%s 冶炼厂=%s(id=%s) 仓库=%s(id=%s) 单价=%s 生效日=%s",
+                freight_id,
+                sm_name,
+                _fid,
+                wh_name,
+                _wid,
+                float(old_price),
+                eff_d.isoformat() if hasattr(eff_d, "isoformat") else eff_d,
+            )
             return {"code": 200, "msg": "运费已删除"}
         except ValueError:
             raise

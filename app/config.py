@@ -82,6 +82,12 @@ MAP_GEOCODER_URL = (
 _MAP_ALLOW_NULL_RAW = os.getenv("MAP_GEOCODE_ALLOW_NULL", "1").strip().lower()
 MAP_GEOCODE_ALLOW_NULL = _MAP_ALLOW_NULL_RAW in ("1", "true", "yes", "on")
 
+try:
+    _map_geo_t = float(os.getenv("MAP_GEOCODER_TIMEOUT", "20").strip() or "20")
+    MAP_GEOCODER_TIMEOUT = max(3.0, min(120.0, _map_geo_t))
+except ValueError:
+    MAP_GEOCODER_TIMEOUT = 20.0
+
 
 def _optional_positive_int(name: str) -> Optional[int]:
     raw = os.getenv(name, "").strip()
