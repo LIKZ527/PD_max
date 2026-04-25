@@ -458,6 +458,10 @@ class DetectionDomainServiceV3:
             return None
         return max(results, key=DetectionDomainServiceV3._result_sort_key)
 
+    async def _is_canceled(self, task_id: str) -> bool:
+        task = await self.registry.get_task(task_id)
+        return bool(not task or task.status == TaskStatusEnum.CANCELED)
+
     @staticmethod
     def _easyocr_auto_detect(image_path: str, ocr_reader: Any) -> List[BBoxDTO]:
         img_cv2 = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -538,11 +542,15 @@ class DetectionDomainServiceV3:
             ocr_reader = EngineContainer.ocr_reader
             if not engine or not ocr_reader:
                 raise RuntimeError("AI detection runtime unavailable")
+            if await self._is_canceled(task_id):
+                return
 
             if bbox:
                 bbox_list = [bbox.x1, bbox.y1, bbox.x2, bbox.y2]
                 async with self.semaphore:
                     res_str = await run_in_threadpool(engine.predict, image_path, bbox_list, "xyxy")
+                if await self._is_canceled(task_id):
+                    return
 
                 res_dict = json.loads(res_str)
                 if res_dict.get("result") == "错误":
@@ -562,11 +570,15 @@ class DetectionDomainServiceV3:
 
             async with self.semaphore:
                 bboxes = await run_in_threadpool(self._easyocr_auto_detect, image_path, ocr_reader)
+            if await self._is_canceled(task_id):
+                return
             bboxes = self._deduplicate_bboxes(bboxes)
 
             if not bboxes:
                 async with self.semaphore:
                     document_override = await run_in_threadpool(self._document_rule_override, image_path, ocr_reader)
+                if await self._is_canceled(task_id):
+                    return
 
                 if document_override:
                     await self.registry.update_task(
@@ -600,10 +612,14 @@ class DetectionDomainServiceV3:
 
             all_results = []
             for b in bboxes:
+                if await self._is_canceled(task_id):
+                    return
                 try:
                     b_list = [b.x1, b.y1, b.x2, b.y2]
                     async with self.semaphore:
                         res_str = await run_in_threadpool(engine.predict, image_path, b_list, "xyxy")
+                    if await self._is_canceled(task_id):
+                        return
 
                     res_dict = json.loads(res_str)
                     if res_dict.get("result") != "错误":
@@ -614,6 +630,8 @@ class DetectionDomainServiceV3:
 
             async with self.semaphore:
                 document_override = await run_in_threadpool(self._document_rule_override, image_path, ocr_reader)
+            if await self._is_canceled(task_id):
+                return
             if document_override and not any(item.get("result") == "篡改" for item in all_results):
                 all_results.append(document_override)
 
@@ -1049,7 +1067,7 @@ async def cancel_task(task_id: str, registry: AbstractTaskRegistry = Depends(get
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    if task.status in [TaskStatusEnum.PENDING, TaskStatusEnum.UPLOADED]:
+    if task.status in [TaskStatusEnum.PENDING, TaskStatusEnum.UPLOADED, TaskStatusEnum.PROCESSING]:
         await registry.update_task(task_id, status=TaskStatusEnum.CANCELED)
     else:
         await registry.delete_task(task_id)
