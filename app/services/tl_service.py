@@ -1093,6 +1093,66 @@ class TLService:
             logger.error(f"获取冶炼厂列表失败: {e}")
             raise
 
+    def get_missing_geo_info(self, include_inactive: bool = False) -> Dict[str, Any]:
+        """返回缺少经度或纬度的仓库、冶炼厂，供前端集中补全地址坐标。"""
+        wh_status_sql = "" if include_inactive else " AND dw.is_active = 1"
+        sm_status_sql = "" if include_inactive else " AND is_active = 1"
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT dw.id AS `仓库id`, dw.name AS `仓库名`, "
+                        "dw.address AS `地址`, dw.province AS `省`, dw.city AS `市`, dw.district AS `区`, "
+                        "dw.longitude AS `经度`, dw.latitude AS `纬度`, "
+                        "dw.is_active AS `is_active`, wt.name AS `类型` "
+                        "FROM dict_warehouses dw "
+                        "LEFT JOIN dict_warehouse_types wt ON dw.warehouse_type_id = wt.id "
+                        f"WHERE (dw.longitude IS NULL OR dw.latitude IS NULL){wh_status_sql} "
+                        "ORDER BY dw.id"
+                    )
+                    wh_columns = [desc[0] for desc in cur.description]
+                    warehouses: List[Dict[str, Any]] = []
+                    for row in cur.fetchall():
+                        rec = dict(zip(wh_columns, row))
+                        rec["缺失字段"] = [
+                            field
+                            for field in ("经度", "纬度")
+                            if rec.get(field) is None
+                        ]
+                        warehouses.append(rec)
+
+                    cur.execute(
+                        "SELECT id AS `冶炼厂id`, name AS `冶炼厂`, address AS `地址`, "
+                        "province AS `省`, city AS `市`, district AS `区`, "
+                        "longitude AS `经度`, latitude AS `纬度`, is_active AS `is_active` "
+                        "FROM dict_factories "
+                        f"WHERE (longitude IS NULL OR latitude IS NULL){sm_status_sql} "
+                        "ORDER BY id"
+                    )
+                    sm_columns = [desc[0] for desc in cur.description]
+                    smelters: List[Dict[str, Any]] = []
+                    for row in cur.fetchall():
+                        rec = dict(zip(sm_columns, row))
+                        rec["缺失字段"] = [
+                            field
+                            for field in ("经度", "纬度")
+                            if rec.get(field) is None
+                        ]
+                        smelters.append(rec)
+
+            return {
+                "warehouses": warehouses,
+                "smelters": smelters,
+                "summary": {
+                    "warehouses": len(warehouses),
+                    "smelters": len(smelters),
+                    "total": len(warehouses) + len(smelters),
+                },
+            }
+        except Exception as e:
+            logger.error(f"获取经纬度缺失列表失败: {e}")
+            raise
+
     # ==================== 接口2b：修改冶炼厂 ====================
 
     def _build_site_smelter_update_patch(self, patch: Dict[str, Any]) -> Dict[str, Any]:

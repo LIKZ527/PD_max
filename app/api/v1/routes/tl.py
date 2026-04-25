@@ -521,6 +521,18 @@ def get_smelters(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/get_missing_geo_info", summary="地址经纬度缺失列表")
+def get_missing_geo_info(
+    include_inactive: bool = Query(False, description="是否包含已停用的仓库和冶炼厂"),
+    service: TLService = Depends(get_tl_service),
+):
+    """返回缺少经度或纬度的仓库、冶炼厂，用于前端集中补全坐标。"""
+    try:
+        return {"code": 200, "data": service.get_missing_geo_info(include_inactive=include_inactive)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ===================== 接口2b：修改冶炼厂 =====================
 
 @router.post("/update_smelter", summary="修改冶炼厂信息")

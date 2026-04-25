@@ -43,6 +43,54 @@
 
 ---
 
+## 接口1a：地址经纬度缺失列表
+- 方法：`GET`
+- 路由：`/tl/get_missing_geo_info`
+- 传入（Query，可选）：`include_inactive` — 是否包含已停用的仓库和冶炼厂，默认 `false`
+- 输出：缺失经度或纬度的仓库、冶炼厂列表，以及汇总数量
+- 逻辑说明：查询 `dict_warehouses` 与 `dict_factories` 中 `longitude IS NULL OR latitude IS NULL` 的记录，默认仅返回启用数据
+- 模拟请求：`GET /tl/get_missing_geo_info`
+- 模拟返回JSON：
+```json
+{
+  "code": 200,
+  "data": {
+    "warehouses": [
+      {
+        "仓库id": 101,
+        "仓库名": "北京仓",
+        "地址": "朝阳区示例路1号",
+        "省": "北京市",
+        "市": "北京市",
+        "区": "朝阳区",
+        "经度": null,
+        "纬度": null,
+        "is_active": 1,
+        "类型": "合作库房",
+        "缺失字段": ["经度", "纬度"]
+      }
+    ],
+    "smelters": [
+      {
+        "冶炼厂id": 201,
+        "冶炼厂": "华北冶炼厂",
+        "地址": "示例地址",
+        "省": "河北省",
+        "市": "保定市",
+        "区": "竞秀区",
+        "经度": null,
+        "纬度": 38.8,
+        "is_active": 1,
+        "缺失字段": ["经度"]
+      }
+    ],
+    "summary": { "warehouses": 1, "smelters": 1, "total": 2 }
+  }
+}
+```
+
+---
+
 ## 接口1b：修改仓库信息
 - 方法：`POST`
 - 路由：`/tl/update_warehouse`
