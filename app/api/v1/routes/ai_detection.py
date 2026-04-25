@@ -35,6 +35,7 @@ from app.ai_detection.easyocr_download_patch import patch_easyocr_download
 from app.ai_detection.history_db import (
     HISTORY_RETENTION_DAYS,
     get_ai_detection_history_image_path,
+    get_latest_ai_detection_history_by_task_id,
     insert_ai_detection_history,
     list_ai_detection_history,
     purge_ai_detection_history_older_than,
@@ -667,15 +668,29 @@ class DetectionDomainServiceV3:
 
     async def generate_visualization(self, task_id: str) -> str:
         task = await self.registry.get_task(task_id)
-        if not task or task.status != TaskStatusEnum.COMPLETED:
-            raise ValueError("Task not completed.")
+        image_path: Optional[str] = None
+        result: Optional[Dict[str, Any]] = None
+        multi_results: List[Dict[str, Any]] = []
+        if task and task.status == TaskStatusEnum.COMPLETED:
+            image_path = task.image_path
+            result = task.result
+            multi_results = list(task.multi_results or [])
+        else:
+            history = await run_in_threadpool(get_latest_ai_detection_history_by_task_id, task_id)
+            if history:
+                image_path = str(history["image_path"])
+                outcome = history.get("outcome") or {}
+                result = outcome.get("result")
+                multi_results = list(outcome.get("multi_results") or [])
+            if not image_path:
+                raise ValueError("Task not completed.")
 
         vis_path = STORAGE_DIR / f"vis_{task_id}.jpg"
         if vis_path.exists():
             return str(vis_path)
 
         def draw_bboxes() -> None:
-            img_cv2 = cv2.imdecode(np.fromfile(task.image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+            img_cv2 = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
             if img_cv2 is None:
                 raise ValueError("无法读取任务原图")
 
@@ -683,9 +698,9 @@ class DetectionDomainServiceV3:
             draw = ImageDraw.Draw(img_pil)
             font = load_chinese_font(22)
 
-            results_to_draw = task.multi_results if task.multi_results else []
-            if task.result and not task.multi_results:
-                results_to_draw.append(task.result)
+            results_to_draw = list(multi_results)
+            if result and not results_to_draw:
+                results_to_draw.append(result)
 
             for res in results_to_draw:
                 original_b = res.get("original_bbox") or res.get("bbox", [0, 0, 10, 10])

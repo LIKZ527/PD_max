@@ -41,6 +41,50 @@ def get_ai_detection_history_image_path(record_id: int) -> Optional[Path]:
     return p if p.is_file() else None
 
 
+def get_latest_ai_detection_history_by_task_id(task_id: str) -> Optional[Dict[str, Any]]:
+    """按异步 task_id 返回最近一条成功历史及归档图路径，用于任务内存丢失后的兜底读取。"""
+    tid = str(task_id or "").strip()
+    if not tid:
+        return None
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, task_id, status, outcome_json, stored_image
+                FROM ai_detection_history
+                WHERE task_id=%s AND status='COMPLETED'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (tid,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+
+    rid, _task_id, status, outcome_json, stored_image = row
+    if not stored_image:
+        return None
+    name = str(stored_image)
+    if "/" in name or "\\" in name or name.startswith("."):
+        return None
+    image_path = HISTORY_IMAGES_DIR / name
+    if not image_path.is_file():
+        return None
+
+    try:
+        outcome = json.loads(outcome_json) if isinstance(outcome_json, str) else _jsonish(outcome_json)
+    except json.JSONDecodeError:
+        outcome = {}
+    return {
+        "id": int(rid),
+        "task_id": _task_id,
+        "status": status,
+        "outcome": outcome or {},
+        "image_path": image_path,
+    }
+
+
 def purge_ai_detection_history_older_than(days: Optional[int] = None) -> int:
     """删除早于「当前 UTC 往前 days 天」的记录，并删除对应归档图。返回删除行数。"""
     d = HISTORY_RETENTION_DAYS if days is None else max(1, int(days))
