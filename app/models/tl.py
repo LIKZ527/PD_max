@@ -465,6 +465,10 @@ class VlmPriceRow(BaseModel):
     """VLM提取的单行数据（供前端编辑）"""
     index: Optional[int] = Field(None, description="序号")
     category: str = Field("", description="品类名称")
+    factory_name: Optional[str] = Field(
+        None,
+        description="多炼厂横向对比表时该行报价对应的冶炼厂名；单厂表通常为空",
+    )
     is_category_start: bool = Field(False, description="是否为合并单元格首行")
     price_1pct_vat: Optional[int] = Field(None, description="1%增值税价格")
     price_3pct_vat: Optional[int] = Field(None, description="3%增值税价格")
