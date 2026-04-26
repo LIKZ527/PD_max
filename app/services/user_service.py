@@ -11,6 +11,7 @@ from jose import JWTError, jwt
 
 from app import config
 from app.database import get_conn
+from app.services.permission_service import PermissionService
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,9 @@ class UserService:
         phone: Optional[str] = None,
         email: Optional[str] = None,
     ) -> Dict[str, Any]:
+        allowed = PermissionService.get_valid_role_codes(active_only=True)
+        if role not in allowed:
+            raise ValueError(f"无效角色，当前可选: {allowed}")
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT id FROM users WHERE username = %s", (username,))
@@ -144,20 +148,31 @@ class UserService:
                 )
                 new_id = cur.lastrowid
 
+        try:
+            PermissionService.create_default_permissions(int(new_id), role)
+        except Exception as exc:
+            logger.warning("创建默认权限失败 user_id=%s: %s", new_id, exc)
+
         logger.info(f"新用户创建: id={new_id}, username={username}")
         return {"code": 200, "msg": "用户创建成功", "id": new_id}
 
     # ---------- A4 修改角色 ----------
 
     def update_role(self, user_id: int, role: str) -> Dict[str, Any]:
-        if role not in ("admin", "user"):
-            raise ValueError("角色值无效，只允许 admin 或 user")
+        allowed = PermissionService.get_valid_role_codes(active_only=True)
+        if role not in allowed:
+            raise ValueError(f"角色值无效，当前可选: {allowed}")
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT id FROM users WHERE id = %s AND is_active = 1", (user_id,))
                 if not cur.fetchone():
                     raise ValueError(f"用户 id={user_id} 不存在")
                 cur.execute("UPDATE users SET role = %s WHERE id = %s", (role, user_id))
+        try:
+            PermissionService.delete_permissions(user_id)
+            PermissionService.create_default_permissions(user_id, role)
+        except Exception as exc:
+            logger.warning("同步权限行失败 user_id=%s: %s", user_id, exc)
         return {"code": 200, "msg": "角色修改成功"}
 
     # ---------- A5 修改密码 ----------
@@ -187,6 +202,10 @@ class UserService:
                 if not cur.fetchone():
                     raise ValueError(f"用户 id={user_id} 不存在")
                 cur.execute("UPDATE users SET is_active = 0 WHERE id = %s", (user_id,))
+        try:
+            PermissionService.delete_permissions(user_id)
+        except Exception as exc:
+            logger.warning("删除用户权限行失败 user_id=%s: %s", user_id, exc)
         return {"code": 200, "msg": "用户已删除"}
 
 
