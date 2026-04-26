@@ -5,9 +5,10 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from datetime import date, datetime, timezone
-from decimal import Decimal, InvalidOperation
-from typing import Any, ClassVar
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import Any, ClassVar, Optional
 
 import pandas as pd
 from sqlalchemy import and_, delete, desc, func, select
@@ -20,6 +21,8 @@ from app.intelligent_prediction.services.weather_client import fetch_weather_for
 from app.intelligent_prediction.schemas.history import (
     DeliveryRecordRead,
     DeliveryRecordUpdate,
+    HistoryDailyWeightMatrixResponse,
+    HistoryDailyWeightMatrixRow,
     HistoryImportResponse,
     HistoryImportRowError,
     HistoryListResponse,
@@ -714,6 +717,86 @@ class HistoryService:
         if q.date_to:
             clauses.append(DeliveryRecord.delivery_date <= q.date_to)
         return clauses
+
+    @staticmethod
+    def _daterange_inclusive(a: date, b: date) -> list[date]:
+        out: list[date] = []
+        d = a
+        while d <= b:
+            out.append(d)
+            d += timedelta(days=1)
+        return out
+
+    @staticmethod
+    def _weight_cell_str(value: Decimal) -> str:
+        q = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return format(q, "f")
+
+    async def daily_weight_matrix(
+        self,
+        session: AsyncSession,
+        q: HistoryQueryParams,
+    ) -> HistoryDailyWeightMatrixResponse:
+        """按大区经理×冶炼厂×送货日汇总重量；各格为两位小数字符串，供历史查询透视表直连展示。"""
+        if q.date_from is None or q.date_to is None:
+            raise ValidationBusinessException("须同时指定 date_from 与 date_to（含）以生成按日矩阵")
+        if q.date_from > q.date_to:
+            raise ValidationBusinessException("date_from 不能晚于 date_to")
+
+        clauses = self._history_filter_clauses(q)
+        wc = and_(*clauses) if clauses else True
+
+        stmt = (
+            select(
+                DeliveryRecord.regional_manager,
+                DeliveryRecord.smelter,
+                DeliveryRecord.delivery_date,
+                func.coalesce(func.sum(DeliveryRecord.weight), 0).label("tw"),
+            )
+            .where(wc)
+            .group_by(
+                DeliveryRecord.regional_manager,
+                DeliveryRecord.smelter,
+                DeliveryRecord.delivery_date,
+            )
+            .order_by(
+                DeliveryRecord.regional_manager,
+                DeliveryRecord.smelter,
+                DeliveryRecord.delivery_date,
+            )
+        )
+        res = await session.execute(stmt)
+        agg: dict[tuple[str, Optional[str]], dict[date, Decimal]] = defaultdict(
+            lambda: defaultdict(Decimal)
+        )
+        for rm, sm, d, tw in res.all():
+            sm_key: Optional[str]
+            if sm is None or not str(sm).strip():
+                sm_key = None
+            else:
+                sm_key = str(sm).strip()
+            key = (str(rm), sm_key)
+            agg[key][d] += Decimal(str(tw))
+
+        dates = self._daterange_inclusive(q.date_from, q.date_to)
+        rows_out: list[HistoryDailyWeightMatrixRow] = []
+        for (rm, sm_key) in sorted(agg.keys(), key=lambda x: (x[0], x[1] or "")):
+            by_d = agg[(rm, sm_key)]
+            cells: list[Optional[str]] = []
+            for dt in dates:
+                raw = by_d.get(dt)
+                if raw is None or raw == 0:
+                    cells.append(None)
+                else:
+                    cells.append(self._weight_cell_str(raw))
+            rows_out.append(
+                HistoryDailyWeightMatrixRow(
+                    regional_manager=rm,
+                    smelter=sm_key,
+                    daily_totals=cells,
+                )
+            )
+        return HistoryDailyWeightMatrixResponse(dates=dates, rows=rows_out)
 
     async def statistics(
         self,

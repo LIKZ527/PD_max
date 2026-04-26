@@ -51,6 +51,24 @@ class HistoryListResponse(BaseModel):
     items: list[DeliveryRecordRead]
 
 
+class HistoryDailyWeightMatrixRow(BaseModel):
+    """按大区经理 + 冶炼厂聚合后，各送货日的合计重量（供历史查询透视表）。"""
+
+    regional_manager: str = Field(..., description="大区经理")
+    smelter: Optional[str] = Field(None, description="冶炼厂；历史无冶炼厂时为 null")
+    daily_totals: list[Optional[str]] = Field(
+        ...,
+        description="与响应 dates 等长；有数据时为固定两位小数字符串（如 209.16），无数据为 null（前端可显示为 —）",
+    )
+
+
+class HistoryDailyWeightMatrixResponse(BaseModel):
+    """送货历史按日透视矩阵：服务端 Decimal 汇总并格式化，避免前端浮点累加产生长小数尾巴。"""
+
+    dates: list[date] = Field(..., description="列日期，含首尾，升序")
+    rows: list[HistoryDailyWeightMatrixRow] = Field(default_factory=list)
+
+
 class HistoryImportRowError(BaseModel):
     """导入错误行信息。"""
 

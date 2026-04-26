@@ -1,4 +1,4 @@
-﻿"""PRD V1：近30天线性加权移动平均 + 仓库周规律系数 + 大区按日汇总。"""
+"""PRD V1：近30天线性加权移动平均 + 仓库周规律系数 + 大区按日汇总。"""
 
 from __future__ import annotations
 
@@ -185,7 +185,7 @@ class PrdForecastService:
 
         if not daily_wv:
             dates = list(_daterange_inclusive(q.date_from, q.date_to))
-            z = [Decimal("0").quantize(Decimal("0.0001"))] * len(dates)
+            z = [Decimal("0").quantize(Decimal("0.01"))] * len(dates)
             return [], PrdForecastChartResponse(dates=dates, total_by_date=z, by_regional_manager=[])
 
         wh_set = {wh for (wh, _, _) in daily_wv.keys()} or {wh for (wh, _, _) in rm_map.keys()}
@@ -202,7 +202,7 @@ class PrdForecastService:
                 wma = _linear_wma(series, d, 30)
                 wd = d.weekday()
                 c = coefs.get((wh, wd), Decimal("1"))
-                pred = (wma * c).quantize(Decimal("0.0001"))
+                pred = (wma * c).quantize(Decimal("0.01"))
                 detail_rows.append(
                     PrdForecastDetailRow(
                         target_date=d,
@@ -210,8 +210,8 @@ class PrdForecastService:
                         warehouse=wh,
                         product_variety=v,
                         smelter=sm_k if sm_k else None,
-                        wma_base=wma.quantize(Decimal("0.0001")),
-                        week_coef=c.quantize(Decimal("0.0001")),
+                        wma_base=wma.quantize(Decimal("0.01")),
+                        week_coef=c.quantize(Decimal("0.01")),
                         predicted_weight=pred,
                     )
                 )
@@ -227,13 +227,13 @@ class PrdForecastService:
         by_rm_series = [
             PrdForecastByRmSeries(
                 regional_manager=rm,
-                totals=[by_d_rm.get((dt, rm), Decimal("0")).quantize(Decimal("0.0001")) for dt in dates],
+                totals=[by_d_rm.get((dt, rm), Decimal("0")).quantize(Decimal("0.01")) for dt in dates],
             )
             for rm in rms_sorted
         ]
         chart = PrdForecastChartResponse(
             dates=dates,
-            total_by_date=[by_d_total.get(dt, Decimal("0")).quantize(Decimal("0.0001")) for dt in dates],
+            total_by_date=[by_d_total.get(dt, Decimal("0")).quantize(Decimal("0.01")) for dt in dates],
             by_regional_manager=by_rm_series,
         )
         return detail_rows, chart
