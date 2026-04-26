@@ -2219,7 +2219,7 @@ class TLService:
     def _map_vlm_to_confirm_items(self, result) -> List[Dict[str, Any]]:
         """将 VLM 结果映射为确认条目：图上可能是基准价或含税价（多列/备注）。此处仅带出 OCR 显式列与预览用不含税/反算（默认税率占位）；确认写入时用冶炼厂系统税率做「基准↔含税」双向统一。"""
         items = []
-        factory_name = result.company_name or ""
+        doc_factory = (result.company_name or "").strip()
         defaults = merge_factory_rates(None)
         for row in result.rows:
             price_normal = row.price_normal_invoice
@@ -2306,8 +2306,11 @@ class TLService:
             if price_reverse is not None:
                 src["price_reverse_invoice"] = SOURCE_ORIGINAL
 
+            row_factory = (getattr(row, "factory_name", None) or "").strip()
+            item_factory = row_factory or doc_factory
+
             items.append({
-                "冶炼厂名": factory_name,
+                "冶炼厂名": item_factory,
                 "冶炼厂id": None,
                 "品类名": row.category,
                 "品类id": None,

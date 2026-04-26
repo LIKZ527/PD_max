@@ -25,6 +25,7 @@ from app.intelligent_prediction.schemas.history import (
     DeliveryRecordRead,
     DeliveryRecordUpdate,
     HistoryBatchDeleteRequest,
+    HistoryDailyWeightMatrixResponse,
     HistoryImportResponse,
     HistoryPurgeAllRequest,
     HistoryListResponse,
@@ -219,6 +220,55 @@ async def history_statistics(
     except Exception as e:
         logger.exception("history_statistics failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get(
+    "/daily-weight-matrix",
+    response_model=HistoryDailyWeightMatrixResponse,
+    summary="历史查询透视表（按日合计重量）",
+    description=(
+        "按「大区经理 + 冶炼厂」聚合，列为 date_from～date_to 内每个送货日；"
+        "各格为服务端汇总后的两位小数字符串，避免前端对多条明细做浮点相加导致 209.15999999999997 等显示。"
+        "须传 date_from、date_to；其余筛选与分页列表、统计接口一致。"
+    ),
+)
+async def history_daily_weight_matrix(
+    regional_manager: Optional[str] = Query(None, description="区域经理（单值）"),
+    regional_managers: list[str] = Query(default=[], description="区域经理（多值）"),
+    smelter: Optional[str] = Query(None, description="冶炼厂（单值）"),
+    smelters: list[str] = Query(default=[], description="冶炼厂（多值）"),
+    warehouse: Optional[str] = Query(None, description="仓库（单值）"),
+    warehouses: list[str] = Query(default=[], description="仓库（多值）"),
+    product_variety: Optional[str] = Query(None, description="品种（单值）"),
+    product_varieties: list[str] = Query(default=[], description="品种（多值）"),
+    date_from: date = Query(..., description="矩阵列起始送货日期（含）"),
+    date_to: date = Query(..., description="矩阵列结束送货日期（含）"),
+    session: AsyncSession = Depends(get_prediction_db_session),
+    svc: HistoryService = Depends(get_history_service_dep),
+) -> HistoryDailyWeightMatrixResponse:
+    q = HistoryQueryParams(
+        page=1,
+        page_size=1,
+        regional_manager=regional_manager,
+        warehouse=warehouse,
+        product_variety=product_variety,
+        regional_managers=regional_managers,
+        smelter=smelter,
+        smelters=smelters,
+        warehouses=warehouses,
+        product_varieties=product_varieties,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    try:
+        return await svc.daily_weight_matrix(session, q)
+    except ValidationBusinessException:
+        raise
+    except BusinessException:
+        raise
+    except Exception as e:
+        logger.exception("history_daily_weight_matrix failed")
+        raise HTTPException(status_code=500, detail=INTERNAL_SERVER_ERROR_MESSAGE) from e
 
 
 @router.put(
