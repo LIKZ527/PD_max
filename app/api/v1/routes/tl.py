@@ -959,7 +959,7 @@ async def import_freight_excel(
     file: UploadFile = File(..., description="由 download_freight_template_excel 生成并填写后的 xlsx"),
     service: TLService = Depends(get_tl_service),
 ):
-    """识别首列库房、表头冶炼厂与单元格数值，写入 freight_rates（当日生效）；字典中不存在的库房/冶炼厂名称会自动新建（已停用则恢复启用）。结果可在 get_freight_list 中查询。"""
+    """按表头识别「库房/仓库」列与各冶炼厂列（支持表头不在第 1 行、库房列不在第 A 列），解析矩阵单元格数值写入 freight_rates（当日生效）；字典中不存在的库房/冶炼厂名称会自动新建（已停用则恢复启用）。结果可在 get_freight_list 中查询。"""
     try:
         raw = await file.read()
         return await asyncio.to_thread(service.import_freight_excel, raw)

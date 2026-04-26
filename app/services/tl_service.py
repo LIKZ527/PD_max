@@ -2873,10 +2873,11 @@ class TLService:
 
     def import_freight_excel(self, content: bytes) -> Dict[str, Any]:
         """
-        解析运费矩阵：第 1 行表头为「库房」+ 冶炼厂名称；自第 2 行起首列为库房名，对应列填运费。
+        解析运费矩阵：在表上方若干行内自动定位「表头行」；按表头文字识别「库房/仓库」列与
+        各冶炼厂列（不再假定库房固定在第 1 列、表头固定在第 1 行，避免与图表/标题行同表时错位）。
         与 upload_freight 相同写入 freight_rates（当日生效）；空单元格跳过。
-        表头或首列出现库中不存在的冶炼厂、库房名称时，自动写入 dict_factories / dict_warehouses
-       （与 add_smelter / add_warehouse 一致；若名称已存在但已停用则恢复启用）。
+        表头或数据行出现库中不存在的冶炼厂、库房名称时，自动写入 dict_factories / dict_warehouses
+        （与 add_smelter / add_warehouse 一致；若名称已存在但已停用则恢复启用）。
         """
         if not content:
             raise ValueError("文件内容为空")
@@ -2903,21 +2904,82 @@ class TLService:
                 raise ValueError("运费不能为负数")
             return round(x, 2)
 
+        def _cell_str(v: Any) -> str:
+            if v is None:
+                return ""
+            return str(v).replace("\u3000", " ").strip()
+
+        def _is_warehouse_header_cell(v: Any) -> bool:
+            s = _cell_str(v)
+            if not s:
+                return False
+            zh = frozenset(
+                {
+                    "库房",
+                    "仓库",
+                    "合作库房",
+                    "库房名称",
+                    "仓库名称",
+                    "收料库房",
+                    "收货仓库",
+                }
+            )
+            if s in zh:
+                return True
+            low = s.casefold()
+            return low in {"warehouse", "warehouse name", "depot"}
+
+        def _find_freight_header_layout(
+            all_rows: List[tuple],
+            *,
+            max_scan_rows: int = 50,
+        ) -> Tuple[int, int, List[Tuple[int, str]]]:
+            """
+            返回 (表头行下标0起, 库房列下标0起, [(冶炼厂列下标, 表头名称), ...])。
+            冶炼厂列：表头行中除库房列外、文本非空的列；同名列取第一次出现。
+            """
+            scan = min(len(all_rows), max_scan_rows)
+            for ri in range(scan):
+                row = all_rows[ri]
+                if not row:
+                    continue
+                wh_col: Optional[int] = None
+                for j, cell in enumerate(row):
+                    if _is_warehouse_header_cell(cell):
+                        wh_col = j
+                        break
+                if wh_col is None:
+                    continue
+                factories: List[Tuple[int, str]] = []
+                seen: Set[str] = set()
+                for j, cell in enumerate(row):
+                    if j == wh_col:
+                        continue
+                    name = _cell_str(cell)
+                    if not name:
+                        continue
+                    dedup = name.casefold() if name.isascii() else name
+                    if dedup in seen:
+                        continue
+                    seen.add(dedup)
+                    factories.append((j, name))
+                if factories:
+                    return ri, wh_col, factories
+            raise ValueError(
+                "未识别运费表头：请在表上方前 "
+                f"{max_scan_rows} 行内提供一行，其中某一列表头为「库房」或「仓库」等，"
+                "且其余非空列表头为冶炼厂名称（勿依赖固定列号；有图表/标题时请把矩阵表头写清）。"
+            )
+
         wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         try:
             ws = wb.active
-            rows_iter = ws.iter_rows(values_only=True)
-            header_row = next(rows_iter, None)
-            if not header_row or not any(
-                c is not None and str(c).strip() for c in header_row
-            ):
-                raise ValueError("无法读取表头（第 1 行）")
+            all_rows = list(ws.iter_rows(values_only=True))
+            if not all_rows:
+                raise ValueError("工作表为空")
 
-            headers = [str(c).strip() if c is not None else "" for c in header_row]
-            if not headers:
-                raise ValueError("表头为空")
+            hdr_idx, wh_col, factory_cols = _find_freight_header_layout(all_rows)
 
-            factory_by_col: Dict[int, Tuple[str, int]] = {}
             stats = {
                 "new_wh": 0,
                 "new_fa": 0,
@@ -2972,17 +3034,10 @@ class TLService:
                         stats["new_fa"] += 1
                         return int(cur.lastrowid)
 
-                    for col_idx in range(1, len(headers)):
-                        h = headers[col_idx]
-                        if not h:
-                            continue
-                        fid = _ensure_factory_id(h)
-                        factory_by_col[col_idx + 1] = (h, fid)
-
-                    if not factory_by_col:
-                        raise ValueError(
-                            "表头从第 2 列起至少需要一列冶炼厂名称（表头不能为空）"
-                        )
+                    factory_by_col: List[Tuple[int, str, int]] = []
+                    for j, hname in factory_cols:
+                        fid = _ensure_factory_id(hname)
+                        factory_by_col.append((j, hname, fid))
 
                     today = date.today().isoformat()
                     written = 0
@@ -2990,11 +3045,12 @@ class TLService:
                     skipped_cells = 0
                     errors: List[str] = []
 
-                    for ridx, row in enumerate(rows_iter, start=2):
+                    for offset, row in enumerate(all_rows[hdr_idx + 1 :]):
+                        excel_row = hdr_idx + 2 + offset
                         if not row:
                             skipped_rows += 1
                             continue
-                        wh_cell = row[0] if len(row) > 0 else None
+                        wh_cell = row[wh_col] if wh_col < len(row) else None
                         if wh_cell is None or (
                             isinstance(wh_cell, str) and not wh_cell.strip()
                         ):
@@ -3004,13 +3060,15 @@ class TLService:
                         try:
                             wid = _ensure_warehouse_id(wh_name)
                         except Exception as ex:
-                            errors.append(f"第{ridx}行：库房「{wh_name}」未能写入字典：{ex}")
+                            errors.append(
+                                f"第{excel_row}行：库房「{wh_name}」未能写入字典：{ex}"
+                            )
                             continue
 
-                        for col_idx, (fname, fid) in factory_by_col.items():
-                            if col_idx - 1 >= len(row):
+                        for j, _fname, fid in factory_by_col:
+                            if j >= len(row):
                                 continue
-                            cell_v = row[col_idx - 1]
+                            cell_v = row[j]
                             freight = _coerce_freight(cell_v)
                             if freight is None:
                                 skipped_cells += 1
