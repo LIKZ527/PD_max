@@ -11,7 +11,7 @@ TL比价模块路由
   1c2.DELETE /tl/purge_warehouse        - 永久删除仓库（硬删除）
   1d.库房单向关联（有向图）：POST /tl/bind_warehouse_link、DELETE /tl/unbind_warehouse_link、
       POST /tl/batch_bind_warehouse_links、POST /tl/batch_unbind_warehouse_links、
-      GET /tl/get_warehouse_links_outbound、GET /tl/get_warehouse_links_inbound、
+      GET /tl/get_warehouse_links_list、GET /tl/get_warehouse_links_outbound、GET /tl/get_warehouse_links_inbound、
       PUT /tl/replace_warehouse_links_outbound
   1e.POST /tl/add_smelter              - 新建冶炼厂
   2. GET  /tl/get_smelters             - 获取冶炼厂列表（size 最大 200）
@@ -532,6 +532,48 @@ def batch_unbind_warehouse_links(
     """同一源库房对列表内多个目标依次解绑；本来不存在的边不计入删除条数。"""
     try:
         return service.batch_unbind_warehouse_links(body.源库房id, body.目标库房id列表)
+    except ValueError as e:
+        raise _tl_value_error_http(e)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/get_warehouse_links_list", summary="库房关联列表（全部有向边分页）")
+def get_warehouse_links_list(
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    warehouse_id: Optional[int] = Query(
+        None,
+        description="涉及该库房 id 的关联（作为源或目标）；不传则不限定",
+    ),
+    from_warehouse_id: Optional[int] = Query(
+        None,
+        ge=1,
+        description="仅源库房 id 等于该值的边",
+    ),
+    to_warehouse_id: Optional[int] = Query(
+        None,
+        ge=1,
+        description="仅目标库房 id 等于该值的边",
+    ),
+    keyword: Optional[str] = Query(
+        None,
+        description="源或目标库房名称模糊匹配（可选）",
+    ),
+    service: TLService = Depends(get_tl_service),
+):
+    """每条记录包含源库房、目标库房摘要及关联 id；可与出边/入边列表接口配合使用。"""
+    try:
+        return service.get_warehouse_links_list(
+            page=page,
+            size=size,
+            warehouse_id=warehouse_id,
+            from_warehouse_id=from_warehouse_id,
+            to_warehouse_id=to_warehouse_id,
+            keyword=keyword,
+        )
     except ValueError as e:
         raise _tl_value_error_http(e)
     except RuntimeError as e:
