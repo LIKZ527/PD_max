@@ -90,6 +90,12 @@ async def on_startup():
     _warn_insecure_defaults()
     create_tables()
     init_default_data()
+    try:
+        from app.services.permission_service import PermissionService
+
+        PermissionService.ensure_table_exists()
+    except Exception:
+        logger.exception("角色权限模板表初始化失败（不影响主流程）")
     _init_admin()
     if app_config.AI_DETECTION_ENABLED:
         from app.api.v1.routes.ai_detection import startup_ai_detection
@@ -199,4 +205,11 @@ def _init_admin():
                 "VALUES (%s, %s, %s, 'admin', 1)",
                 (username, hash_password(password), "管理员"),
             )
+            new_id = cur.lastrowid
+        try:
+            from app.services.permission_service import PermissionService
+
+            PermissionService.create_default_permissions(int(new_id), "admin")
+        except Exception:
+            logger.exception("为新管理员创建权限行失败，可稍后由接口拉取权限时自动补齐")
     logger.info("默认管理员账户已创建：username=%s", username)

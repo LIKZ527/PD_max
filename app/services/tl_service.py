@@ -1093,10 +1093,8 @@ class TLService:
             logger.error(f"获取冶炼厂列表失败: {e}")
             raise
 
-    def get_missing_geo_info(self, include_inactive: bool = False) -> Dict[str, Any]:
-        """返回缺少经度或纬度的仓库、冶炼厂，供前端集中补全地址坐标。"""
-        wh_status_sql = "" if include_inactive else " AND dw.is_active = 1"
-        sm_status_sql = "" if include_inactive else " AND is_active = 1"
+    def get_missing_geo_info(self) -> Dict[str, Any]:
+        """返回启用中且缺少经度或纬度的仓库、冶炼厂，供前端集中补全地址坐标。"""
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
@@ -1107,7 +1105,8 @@ class TLService:
                         "dw.is_active AS `is_active`, wt.name AS `类型` "
                         "FROM dict_warehouses dw "
                         "LEFT JOIN dict_warehouse_types wt ON dw.warehouse_type_id = wt.id "
-                        f"WHERE (dw.longitude IS NULL OR dw.latitude IS NULL){wh_status_sql} "
+                        "WHERE (dw.longitude IS NULL OR dw.latitude IS NULL) "
+                        "AND dw.is_active = 1 "
                         "ORDER BY dw.id"
                     )
                     wh_columns = [desc[0] for desc in cur.description]
@@ -1126,7 +1125,8 @@ class TLService:
                         "province AS `省`, city AS `市`, district AS `区`, "
                         "longitude AS `经度`, latitude AS `纬度`, is_active AS `is_active` "
                         "FROM dict_factories "
-                        f"WHERE (longitude IS NULL OR latitude IS NULL){sm_status_sql} "
+                        "WHERE (longitude IS NULL OR latitude IS NULL) "
+                        "AND is_active = 1 "
                         "ORDER BY id"
                     )
                     sm_columns = [desc[0] for desc in cur.description]

@@ -71,13 +71,60 @@ TABLE_STATEMENTS = [
         username VARCHAR(50) NOT NULL UNIQUE COMMENT '用户名',
         hashed_password VARCHAR(255) NOT NULL COMMENT 'bcrypt 加密后的密码',
         real_name VARCHAR(50) COMMENT '真实姓名',
-        role ENUM('admin', 'user') NOT NULL DEFAULT 'user' COMMENT '角色',
+        role VARCHAR(32) NOT NULL DEFAULT 'user' COMMENT '角色代码，见 role_definitions.code',
         phone VARCHAR(20) COMMENT '手机号',
         email VARCHAR(100) COMMENT '邮箱',
         is_active TINYINT(1) DEFAULT 1 COMMENT '是否启用',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户表';
+    """,
+    # 可配置角色（与 users.role、role_templates.role 一致）
+    """
+    CREATE TABLE IF NOT EXISTS role_definitions (
+        id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+        code VARCHAR(32) NOT NULL UNIQUE COMMENT '角色代码，写入 users.role',
+        name VARCHAR(64) NOT NULL COMMENT '显示名称',
+        description VARCHAR(255) DEFAULT NULL COMMENT '说明',
+        sort_order INT NOT NULL DEFAULT 0 COMMENT '排序，升序展示',
+        is_system TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1=内置不可删除',
+        is_active TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1=启用，可分配给新用户',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_role_definitions_active (is_active),
+        INDEX idx_role_definitions_sort (sort_order)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='角色定义（配置管理）';
+    """,
+    # 权限字段定义（动态增删列时同步 user_permissions 与角色模板 JSON）
+    """
+    CREATE TABLE IF NOT EXISTS permission_definitions (
+        field_name VARCHAR(64) PRIMARY KEY COMMENT '权限字段名（如 perm_xxx）',
+        label VARCHAR(64) NOT NULL COMMENT '显示名称',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='权限字段定义表';
+    """,
+    # 角色权限模板（JSON：字段名 -> 0/1；初始仅 seed 管理员模板且全为 0，由接口维护）
+    """
+    CREATE TABLE IF NOT EXISTS role_templates (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+        role VARCHAR(32) NOT NULL UNIQUE COMMENT '与 users.role 对应：admin / user',
+        template_json TEXT NOT NULL COMMENT '权限模板 JSON',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='角色权限模板表';
+    """,
+    # 用户细粒度权限（动态列与 permission_definitions 对齐）
+    """
+    CREATE TABLE IF NOT EXISTS user_permissions (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL COMMENT '用户ID',
+        role VARCHAR(32) NOT NULL DEFAULT 'user' COMMENT '权限行角色，与 users.role 对齐',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_user_permissions_user_id (user_id),
+        INDEX idx_user_permissions_role (role),
+        CONSTRAINT fk_user_permissions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户权限配置表';
     """,
     # 品类字典表
     """
@@ -839,6 +886,78 @@ def ensure_dict_factories_geo_region_columns() -> None:
         connection.close()
 
 
+def ensure_users_role_varchar_and_role_definitions() -> None:
+    """旧库：users.role 从 ENUM 改为 VARCHAR；补全 role_definitions 与角色模板行。"""
+    config_dict = get_mysql_config()
+    connection = pymysql.connect(**config_dict)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SHOW TABLES LIKE 'role_definitions'")
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS role_definitions (
+                        id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',
+                        code VARCHAR(32) NOT NULL UNIQUE COMMENT '角色代码',
+                        name VARCHAR(64) NOT NULL COMMENT '显示名称',
+                        description VARCHAR(255) DEFAULT NULL COMMENT '说明',
+                        sort_order INT NOT NULL DEFAULT 0 COMMENT '排序',
+                        is_system TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1=内置不可删除',
+                        is_active TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1=启用',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_role_definitions_active (is_active),
+                        INDEX idx_role_definitions_sort (sort_order)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='角色定义';
+                    """
+                )
+                logger.info("已创建 role_definitions 表")
+
+            cursor.execute("SHOW TABLES LIKE 'users'")
+            if cursor.fetchone():
+                cursor.execute(
+                    """
+                    SELECT DATA_TYPE, COLUMN_TYPE FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'
+                    AND COLUMN_NAME = 'role'
+                    """
+                )
+                col = cursor.fetchone()
+                if col:
+                    ctype = (col[1] or "") + (col[0] or "")
+                    if "enum" in ctype.lower():
+                        cursor.execute(
+                            """
+                            ALTER TABLE users MODIFY COLUMN role VARCHAR(32) NOT NULL
+                            DEFAULT 'user' COMMENT '角色代码，见 role_definitions.code'
+                            """
+                        )
+                        logger.info("已将 users.role 从 ENUM 迁移为 VARCHAR(32)")
+
+            cursor.execute(
+                """
+                INSERT IGNORE INTO role_definitions
+                (code, name, description, sort_order, is_system, is_active)
+                VALUES
+                ('admin', '管理员', '系统内置管理员', 0, 1, 1),
+                ('user', '普通用户', '系统内置默认角色', 10, 1, 1)
+                """
+            )
+
+            cursor.execute("SELECT code FROM role_definitions")
+            for (code,) in cursor.fetchall():
+                cursor.execute(
+                    """
+                    INSERT IGNORE INTO role_templates (role, template_json)
+                    VALUES (%s, '{}')
+                    """,
+                    (code,),
+                )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def ensure_ai_detection_history_stored_image_column() -> None:
     """已有库升级：为 ai_detection_history 增加 stored_image（新建库已由 CREATE TABLE 包含）。"""
     config_dict = get_mysql_config()
@@ -873,6 +992,10 @@ def create_tables() -> None:
         logger.info("所有数据表创建完成")
     finally:
         connection.close()
+    try:
+        ensure_users_role_varchar_and_role_definitions()
+    except Exception:
+        logger.exception("检查/迁移 users.role 与 role_definitions 失败")
     try:
         ensure_quote_details_price_field_sources_column()
     except Exception:
