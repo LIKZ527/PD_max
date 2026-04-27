@@ -53,6 +53,8 @@ from app.services.tl_dict_geo_crud import (
     warehouse_links_inbound as sa_wh_links_inbound,
     warehouse_links_outbound as sa_wh_links_outbound,
     warehouse_links_replace_outbound as sa_wh_links_replace_outbound,
+    warehouse_links_batch_bind as sa_wh_links_batch_bind,
+    warehouse_links_batch_unbind as sa_wh_links_batch_unbind,
     warehouse_list as sa_wh_list,
     warehouse_update as sa_wh_update,
 )
@@ -969,6 +971,45 @@ class TLService:
             "data": {
                 "源库房id": data.get("fromWarehouseId"),
                 "目标库房id列表": data.get("toWarehouseIds") or [],
+            },
+        }
+
+    def batch_bind_warehouse_links(
+        self,
+        from_wh_id: int,
+        to_wh_ids: List[int],
+    ) -> Dict[str, Any]:
+        """同一源库房一次性绑定多条出边（已存在的边跳过）。"""
+        res = _raise_tl_geo_crud_result(
+            sa_wh_links_batch_bind(from_wh_id, to_wh_ids)
+        )
+        data = res.get("data") or {}
+        return {
+            "code": 200,
+            "msg": str(res.get("msg") or "绑定完成"),
+            "data": {
+                "源库房id": data.get("fromWarehouseId"),
+                "新增边数": int(data.get("inserted") or 0),
+                "跳过已存在边数": int(data.get("skippedDuplicate") or 0),
+            },
+        }
+
+    def batch_unbind_warehouse_links(
+        self,
+        from_wh_id: int,
+        to_wh_ids: List[int],
+    ) -> Dict[str, Any]:
+        """同一源库房一次性解绑多条出边。"""
+        res = _raise_tl_geo_crud_result(
+            sa_wh_links_batch_unbind(from_wh_id, to_wh_ids)
+        )
+        data = res.get("data") or {}
+        return {
+            "code": 200,
+            "msg": str(res.get("msg") or "解绑完成"),
+            "data": {
+                "源库房id": data.get("fromWarehouseId"),
+                "删除边数": int(data.get("deleted") or 0),
             },
         }
 
