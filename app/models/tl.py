@@ -243,6 +243,18 @@ class WarehouseLinksReplaceOutboundRequest(BaseModel):
     )
 
 
+class WarehouseLinksBatchOutboundRequest(BaseModel):
+    """同一源库房对多个目标的一次性绑定或解绑（与 replace 不同：不删除未出现在列表中的其它出边）"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    源库房id: int = Field(..., ge=1, description="出边起点库房 id")
+    目标库房id列表: List[int] = Field(
+        default_factory=list,
+        description="目标库房 id 列表；空列表时批量绑定/解绑均无操作（解绑返回删除 0）",
+    )
+
+
 class UpdateWarehouseRequest(BaseModel):
     """修改仓库请求体"""
     仓库id: int = Field(..., description="仓库ID")

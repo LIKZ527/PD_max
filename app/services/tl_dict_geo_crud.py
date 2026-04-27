@@ -832,6 +832,144 @@ def warehouse_links_replace_outbound(from_wh_id: int, to_wh_ids: List[int]) -> D
         return _err(CODE_DB, f"数据库操作异常: {e}")
 
 
+def _normalize_outbound_targets(
+    from_wh_id: int,
+    to_wh_ids: List[Any],
+) -> Tuple[Optional[str], List[int]]:
+    """解析目标 id 列表：去重、去自环、校验为正整数。返回 (错误信息, 唯一目标 id 列表)。"""
+    uniq: List[int] = []
+    seen: Set[int] = set()
+    for x in to_wh_ids:
+        try:
+            tid = int(x)
+        except (TypeError, ValueError):
+            return "目标库房 id 列表无效", []
+        if tid < 1:
+            return "目标库房 id 无效", []
+        if tid == from_wh_id:
+            continue
+        if tid in seen:
+            continue
+        seen.add(tid)
+        uniq.append(tid)
+    return "", uniq
+
+
+def warehouse_links_batch_bind(from_wh_id: int, to_wh_ids: List[Any]) -> Dict[str, Any]:
+    """同一源库房批量新增出边；已存在的边跳过并计入 skippedDuplicate。"""
+    try:
+        if from_wh_id < 1:
+            return _err(CODE_VALIDATION, "源库房 id 无效")
+
+        err_msg, uniq = _normalize_outbound_targets(from_wh_id, to_wh_ids or [])
+        if err_msg:
+            return _err(CODE_VALIDATION, err_msg)
+
+        if not uniq:
+            return _ok(
+                "绑定完成",
+                data={
+                    "fromWarehouseId": from_wh_id,
+                    "inserted": 0,
+                    "skippedDuplicate": 0,
+                },
+            )
+
+        with get_conn() as conn:
+            with conn.cursor(DictCursor) as cur:
+                cur.execute(
+                    "SELECT id FROM dict_warehouses WHERE id = %s",
+                    (from_wh_id,),
+                )
+                if not cur.fetchone():
+                    return _err(CODE_NOT_FOUND, "源库房不存在")
+
+                ph = ",".join(["%s"] * len(uniq))
+                cur.execute(
+                    f"SELECT id FROM dict_warehouses WHERE id IN ({ph})",
+                    tuple(uniq),
+                )
+                ok_ids = {int(r["id"]) for r in cur.fetchall()}
+                missing = [i for i in uniq if i not in ok_ids]
+                if missing:
+                    return _err(CODE_NOT_FOUND, f"目标库房不存在: {missing}")
+
+                cur.execute(
+                    f"SELECT to_warehouse_id FROM dict_warehouse_links "
+                    f"WHERE from_warehouse_id = %s AND to_warehouse_id IN ({ph})",
+                    (from_wh_id,) + tuple(uniq),
+                )
+                already = {int(r["to_warehouse_id"]) for r in cur.fetchall()}
+                pending = [t for t in uniq if t not in already]
+                skipped_dup = len(uniq) - len(pending)
+
+                for t in pending:
+                    cur.execute(
+                        "INSERT INTO dict_warehouse_links (from_warehouse_id, to_warehouse_id) "
+                        "VALUES (%s,%s)",
+                        (from_wh_id, t),
+                    )
+                conn.commit()
+
+        return _ok(
+            "绑定完成",
+            data={
+                "fromWarehouseId": from_wh_id,
+                "inserted": len(pending),
+                "skippedDuplicate": skipped_dup,
+            },
+        )
+    except pymysql.IntegrityError as e:
+        logger.warning("批量绑定出边触发约束: %s", e)
+        return _err(CODE_DB, f"数据库操作异常: {e}")
+    except Exception as e:
+        logger.exception("批量绑定库房出边失败")
+        return _err(CODE_DB, f"数据库操作异常: {e}")
+
+
+def warehouse_links_batch_unbind(from_wh_id: int, to_wh_ids: List[Any]) -> Dict[str, Any]:
+    """同一源库房批量删除出边；不存在的边不产生错误。"""
+    try:
+        if from_wh_id < 1:
+            return _err(CODE_VALIDATION, "源库房 id 无效")
+
+        err_msg, uniq = _normalize_outbound_targets(from_wh_id, to_wh_ids or [])
+        if err_msg:
+            return _err(CODE_VALIDATION, err_msg)
+
+        if not uniq:
+            return _ok(
+                "解绑完成",
+                data={"fromWarehouseId": from_wh_id, "deleted": 0},
+            )
+
+        with get_conn() as conn:
+            with conn.cursor(DictCursor) as cur:
+                cur.execute(
+                    "SELECT id FROM dict_warehouses WHERE id = %s",
+                    (from_wh_id,),
+                )
+                if not cur.fetchone():
+                    return _err(CODE_NOT_FOUND, "源库房不存在")
+
+                ph = ",".join(["%s"] * len(uniq))
+                cur.execute(
+                    f"DELETE FROM dict_warehouse_links WHERE from_warehouse_id = %s "
+                    f"AND to_warehouse_id IN ({ph})",
+                    (from_wh_id,) + tuple(uniq),
+                )
+                deleted = int(cur.rowcount)
+                conn.commit()
+
+        return _ok(
+            "解绑完成",
+            data={"fromWarehouseId": from_wh_id, "deleted": deleted},
+        )
+    except Exception as e:
+        logger.exception("批量解绑库房出边失败")
+        return _err(CODE_DB, f"数据库操作异常: {e}")
+
+
 # ---------- 冶炼厂（无 type 字段）----------
 
 

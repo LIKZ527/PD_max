@@ -10,6 +10,7 @@ TL比价模块路由
   1c.DELETE /tl/delete_warehouse        - 删除仓库（软删除）
   1c2.DELETE /tl/purge_warehouse        - 永久删除仓库（硬删除）
   1d.库房单向关联（有向图）：POST /tl/bind_warehouse_link、DELETE /tl/unbind_warehouse_link、
+      POST /tl/batch_bind_warehouse_links、POST /tl/batch_unbind_warehouse_links、
       GET /tl/get_warehouse_links_outbound、GET /tl/get_warehouse_links_inbound、
       PUT /tl/replace_warehouse_links_outbound
   1e.POST /tl/add_smelter              - 新建冶炼厂
@@ -62,6 +63,7 @@ from app.models.tl import (
     AddWarehouseTypeRequest,
     UpdateWarehouseRequest,
     WarehouseLinkBindRequest,
+    WarehouseLinksBatchOutboundRequest,
     WarehouseLinksReplaceOutboundRequest,
     UpdateWarehouseTypeRequest,
     AddSmelterRequest,
@@ -498,6 +500,38 @@ def unbind_warehouse_link(
     """删除 ``from_warehouse_id → to_warehouse_id`` 这一条边。"""
     try:
         return service.unbind_warehouse_link(from_warehouse_id, to_warehouse_id)
+    except ValueError as e:
+        raise _tl_value_error_http(e)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/batch_bind_warehouse_links", summary="批量绑定库房单向关联（一次新增多条出边）")
+def batch_bind_warehouse_links(
+    body: WarehouseLinksBatchOutboundRequest,
+    service: TLService = Depends(get_tl_service),
+):
+    """同一源库房对列表内多个目标依次绑定；已存在的边跳过并计入 skipped。"""
+    try:
+        return service.batch_bind_warehouse_links(body.源库房id, body.目标库房id列表)
+    except ValueError as e:
+        raise _tl_value_error_http(e)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/batch_unbind_warehouse_links", summary="批量解绑库房单向关联（一次删除多条出边）")
+def batch_unbind_warehouse_links(
+    body: WarehouseLinksBatchOutboundRequest,
+    service: TLService = Depends(get_tl_service),
+):
+    """同一源库房对列表内多个目标依次解绑；本来不存在的边不计入删除条数。"""
+    try:
+        return service.batch_unbind_warehouse_links(body.源库房id, body.目标库房id列表)
     except ValueError as e:
         raise _tl_value_error_http(e)
     except RuntimeError as e:
