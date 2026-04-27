@@ -38,6 +38,7 @@ from app.price_tax_utils import (
 )
 from app.services.tl_dict_geo_crud import (
     CODE_DB as SA_CODE_DB,
+    CODE_DUP_LINK as SA_CODE_DUP_LINK,
     CODE_DUP_NAME as SA_CODE_DUP_NAME,
     CODE_INTERNAL as SA_CODE_INTERNAL,
     CODE_NOT_FOUND as SA_CODE_NOT_FOUND,
@@ -47,6 +48,11 @@ from app.services.tl_dict_geo_crud import (
     smelter_list as sa_smelter_list,
     smelter_update as sa_smelter_update,
     warehouse_create as sa_wh_create,
+    warehouse_link_bind as sa_wh_link_bind,
+    warehouse_link_unbind as sa_wh_link_unbind,
+    warehouse_links_inbound as sa_wh_links_inbound,
+    warehouse_links_outbound as sa_wh_links_outbound,
+    warehouse_links_replace_outbound as sa_wh_links_replace_outbound,
     warehouse_list as sa_wh_list,
     warehouse_update as sa_wh_update,
 )
@@ -211,7 +217,7 @@ def _raise_tl_geo_crud_result(res: Dict[str, Any]) -> Dict[str, Any]:
     if c == SA_CODE_OK:
         return res
     msg = str(res.get("msg") or "操作失败")
-    if c in (SA_CODE_VALIDATION, SA_CODE_NOT_FOUND, SA_CODE_DUP_NAME):
+    if c in (SA_CODE_VALIDATION, SA_CODE_NOT_FOUND, SA_CODE_DUP_NAME, SA_CODE_DUP_LINK):
         raise ValueError(msg)
     if c in (SA_CODE_DB, SA_CODE_INTERNAL):
         raise RuntimeError(msg)
@@ -782,6 +788,11 @@ class TLService:
                         "UPDATE dict_warehouses SET is_active = 0 WHERE id = %s",
                         (warehouse_id,),
                     )
+                    cur.execute(
+                        "DELETE FROM dict_warehouse_links WHERE from_warehouse_id = %s "
+                        "OR to_warehouse_id = %s",
+                        (warehouse_id, warehouse_id),
+                    )
             return {"code": 200, "msg": "仓库已删除"}
         except ValueError:
             raise
@@ -819,6 +830,147 @@ class TLService:
         except Exception as e:
             logger.error(f"硬删除仓库失败: {e}")
             raise
+
+    # ==================== 库房单向关联（有向图边）====================
+
+    def bind_warehouse_link(self, from_wh_id: int, to_wh_id: int) -> Dict[str, Any]:
+        """新增出边：源库房 -> 目标库房。"""
+        res = _raise_tl_geo_crud_result(sa_wh_link_bind(from_wh_id, to_wh_id))
+        data = res.get("data") or {}
+        return {
+            "code": 200,
+            "msg": str(res.get("msg") or "绑定成功"),
+            "data": {
+                "关联id": data.get("linkId"),
+                "源库房id": data.get("fromWarehouseId"),
+                "目标库房id": data.get("toWarehouseId"),
+                "创建时间": data.get("createTime"),
+            },
+        }
+
+    def unbind_warehouse_link(self, from_wh_id: int, to_wh_id: int) -> Dict[str, Any]:
+        """删除出边。"""
+        _raise_tl_geo_crud_result(sa_wh_link_unbind(from_wh_id, to_wh_id))
+        return {"code": 200, "msg": "解绑成功"}
+
+    def get_warehouse_links_outbound(
+        self,
+        warehouse_id: int,
+        page: int = 1,
+        size: int = 50,
+    ) -> Dict[str, Any]:
+        """分页列出某库房指向哪些库房（出边）。"""
+        res = _raise_tl_geo_crud_result(
+            sa_wh_links_outbound(warehouse_id, page=page, size=size)
+        )
+        payload = res.get("data") or {}
+        raw_list = payload.get("list") or []
+        all_types: List[str] = []
+        for it in raw_list:
+            tgt = (it.get("target") or {}) if isinstance(it.get("target"), dict) else {}
+            tn = str(tgt.get("type") or "").strip()
+            if tn:
+                all_types.append(tn)
+        tid_by_name = self._warehouse_type_ids_by_names(all_types)
+        tcol = self._batch_warehouse_type_colors(
+            [tid_by_name[t] for t in all_types if t in tid_by_name]
+        )
+        out_rows: List[Dict[str, Any]] = []
+        for it in raw_list:
+            tgt = it.get("target") or {}
+            tname = str(tgt.get("type") or "").strip()
+            wt_id = tid_by_name.get(tname) if tname else None
+            row = self._site_wh_item_to_tl_row(tgt, tid_by_name)
+            if wt_id is not None:
+                t_cc = tcol.get(int(wt_id))
+                row["库房类型颜色配置"] = t_cc
+                row["颜色配置"] = t_cc
+            out_rows.append(
+                {
+                    "关联id": it.get("linkId"),
+                    "源库房id": it.get("fromWarehouseId"),
+                    "目标库房id": it.get("toWarehouseId"),
+                    "创建时间": it.get("createTime"),
+                    "目标库房": row,
+                }
+            )
+        return {
+            "code": 200,
+            "msg": "查询成功",
+            "list": out_rows,
+            "total": int(payload.get("total") or 0),
+            "page": int(payload.get("page") or page),
+            "size": int(payload.get("size") or size),
+        }
+
+    def get_warehouse_links_inbound(
+        self,
+        warehouse_id: int,
+        page: int = 1,
+        size: int = 50,
+    ) -> Dict[str, Any]:
+        """分页列出哪些库房指向该库房（入边）。"""
+        res = _raise_tl_geo_crud_result(
+            sa_wh_links_inbound(warehouse_id, page=page, size=size)
+        )
+        payload = res.get("data") or {}
+        raw_list = payload.get("list") or []
+        all_types: List[str] = []
+        for it in raw_list:
+            src = (it.get("source") or {}) if isinstance(it.get("source"), dict) else {}
+            tn = str(src.get("type") or "").strip()
+            if tn:
+                all_types.append(tn)
+        tid_by_name = self._warehouse_type_ids_by_names(all_types)
+        tcol = self._batch_warehouse_type_colors(
+            [tid_by_name[t] for t in all_types if t in tid_by_name]
+        )
+        out_rows: List[Dict[str, Any]] = []
+        for it in raw_list:
+            src = it.get("source") or {}
+            tname = str(src.get("type") or "").strip()
+            wt_id = tid_by_name.get(tname) if tname else None
+            row = self._site_wh_item_to_tl_row(src, tid_by_name)
+            if wt_id is not None:
+                t_cc = tcol.get(int(wt_id))
+                row["库房类型颜色配置"] = t_cc
+                row["颜色配置"] = t_cc
+            out_rows.append(
+                {
+                    "关联id": it.get("linkId"),
+                    "源库房id": it.get("fromWarehouseId"),
+                    "目标库房id": it.get("toWarehouseId"),
+                    "创建时间": it.get("createTime"),
+                    "源库房": row,
+                }
+            )
+        return {
+            "code": 200,
+            "msg": "查询成功",
+            "list": out_rows,
+            "total": int(payload.get("total") or 0),
+            "page": int(payload.get("page") or page),
+            "size": int(payload.get("size") or size),
+        }
+
+    def replace_warehouse_links_outbound(
+        self,
+        from_wh_id: int,
+        to_wh_ids: List[int],
+    ) -> Dict[str, Any]:
+        """将源库房出边整体替换为目标 id 列表（改）。"""
+        res = _raise_tl_geo_crud_result(
+            sa_wh_links_replace_outbound(from_wh_id, to_wh_ids)
+        )
+        data = res.get("data") or {}
+        return {
+            "code": 200,
+            "msg": str(res.get("msg") or "替换成功"),
+            "data": {
+                "源库房id": data.get("fromWarehouseId"),
+                "目标库房id列表": data.get("toWarehouseIds") or [],
+            },
+        }
 
     # ==================== 库房类型维护（类型与颜色一对一）====================
 
@@ -1444,6 +1596,11 @@ class TLService:
                         tuple(ids),
                     )
                     n = cur.rowcount
+                    cur.execute(
+                        f"DELETE FROM dict_warehouse_links WHERE from_warehouse_id IN ({ph}) "
+                        f"OR to_warehouse_id IN ({ph})",
+                        tuple(ids + ids),
+                    )
             return {"code": 200, "msg": f"已批量停用 {n} 个仓库", "更新行数": n}
         except Exception as e:
             logger.error(f"批量停用仓库失败: {e}")
