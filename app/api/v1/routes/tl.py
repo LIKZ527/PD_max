@@ -16,6 +16,7 @@ TL比价模块路由
   3b.POST /tl/upload_variety           - 上传品种（批量写入 dict_categories）
   4. POST /tl/get_comparison           - 获取比价表
   5. POST /tl/upload_price_table       - 上传价格表（OCR识别，返回原始识别结果）
+  5a.POST /tl/upload_price_table_excel - 上传报价列表（xlsx 解析，返回 items/full_data 供确认写入）
   5b.POST /tl/confirm_price_table      - 确认写入报价数据（冶炼厂须字典名称精确匹配；品类缺失仍可自动新建）
   5b2.POST /tl/manual_quote            - 手写录入报价（无 OCR；请求体与 confirm 相同，full_data 可省略）
   5b3.POST /tl/update_quote_detail     - 按明细 id 修改报价（改价后按冶炼厂税率重算各档含税价）
@@ -729,6 +730,32 @@ def upload_price_table(
             )
     try:
         return service.upload_price_table(file)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/upload_price_table_excel", summary="上传报价列表（Excel xlsx）")
+def upload_price_table_excel(
+    file: List[UploadFile] = File(
+        ...,
+        description="报价列表 .xlsx，可多文件；读取首工作表。表头须含冶炼厂、品种（品类）及至少一列价格；与 export_quote_details_excel 导出列兼容",
+    ),
+    service: TLService = Depends(get_tl_service),
+):
+    """
+    解析为与 OCR 上传类似的 ``data.details``：每项 ``success``、``items``、``full_data``；
+    成功项用 ``file`` 表示文件名；若「日期」列全日相同则附带 ``suggested_quote_date``。
+    前端确认时仍调用 ``POST /tl/confirm_price_table``，传入 ``报价日期`` 与 ``items``（及可选 ``full_data``）。
+    """
+    for f in file:
+        fn = (f.filename or "").lower()
+        if not fn.endswith(".xlsx"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"文件 '{f.filename}' 格式不支持，仅允许 .xlsx",
+            )
+    try:
+        return service.upload_price_table_excel(file)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

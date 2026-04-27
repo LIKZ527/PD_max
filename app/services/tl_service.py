@@ -2216,6 +2216,289 @@ class TLService:
                     pass
             raise
 
+    @staticmethod
+    def _normalize_excel_header_cell(s: Any) -> str:
+        if s is None or (isinstance(s, float) and str(s) == "nan"):
+            return ""
+        return str(s).replace("\u3000", " ").strip()
+
+    @classmethod
+    def _classify_quote_excel_column(cls, col_name: Any) -> Optional[str]:
+        """
+        将表头映射为逻辑字段：smelter, category, quote_date, net, p1, p3, p13,
+        normal_inv, reverse_inv, remark, basis。
+        """
+        x = cls._normalize_excel_header_cell(col_name)
+        if not x:
+            return None
+        low = x.casefold()
+        exact: Dict[str, str] = {
+            "冶炼厂": "smelter",
+            "冶炼厂名": "smelter",
+            "厂家": "smelter",
+            "工厂": "smelter",
+            "smelter": "smelter",
+            "factory": "smelter",
+            "品种": "category",
+            "品类": "category",
+            "品类名": "category",
+            "variety": "category",
+            "category": "category",
+            "日期": "quote_date",
+            "报价日期": "quote_date",
+            "基准价": "net",
+            "普通价": "net",
+            "不含税价": "net",
+            "不含税基准价": "net",
+            "价格": "net",
+            "单价": "net",
+            "unit_price": "net",
+            "3%含税价": "p3",
+            "价格_3pct增值税": "p3",
+            "13%含税价": "p13",
+            "价格_13pct增值税": "p13",
+            "1%含税价": "p1",
+            "价格_1pct增值税": "p1",
+            "普通发票价格": "normal_inv",
+            "反向发票价格": "reverse_inv",
+            "备注": "remark",
+            "价格口径": "basis",
+        }
+        if x in exact:
+            return exact[x]
+        if low in exact:
+            return exact[low]
+        if "含3%" in x or "3%专" in x or "3%增值税" in x:
+            return "p3"
+        if "含13%" in x or "13%专" in x or "13%增值税" in x:
+            return "p13"
+        if "含1%" in x or "1%普" in x or "1%增值税" in x:
+            return "p1"
+        if "反向发票" in x:
+            return "reverse_inv"
+        if "普通发票" in x and "价格" in x:
+            return "normal_inv"
+        return None
+
+    @staticmethod
+    def _coerce_excel_price(v: Any) -> Optional[float]:
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            v = s.replace(",", "").replace("，", "")
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None
+        if x != x or x in (float("inf"), float("-inf")):
+            return None
+        return round(x, 4)
+
+    @classmethod
+    def _excel_row_dict_to_confirm_item(cls, row_fields: Dict[str, Any]) -> Dict[str, Any]:
+        """将一行解析后的逻辑字段转为 confirm_price_table 所需的 item。"""
+        sm = cls._normalize_excel_header_cell(row_fields.get("smelter"))
+        cat = cls._normalize_excel_header_cell(row_fields.get("category"))
+        if not sm or not cat:
+            raise ValueError("行缺少冶炼厂或品种（品类）")
+
+        net = cls._coerce_excel_price(row_fields.get("net"))
+        p1 = cls._coerce_excel_price(row_fields.get("p1"))
+        p3 = cls._coerce_excel_price(row_fields.get("p3"))
+        p13 = cls._coerce_excel_price(row_fields.get("p13"))
+        pn = cls._coerce_excel_price(row_fields.get("normal_inv"))
+        pr = cls._coerce_excel_price(row_fields.get("reverse_inv"))
+        remark_raw = row_fields.get("remark")
+        remark = cls._normalize_excel_header_cell(remark_raw) or None
+        basis_raw = row_fields.get("basis")
+        basis_s = cls._normalize_excel_header_cell(basis_raw) or None
+        _basis_ok = frozenset({"ex_vat", "incl_1pct", "incl_3pct", "incl_13pct"})
+        if basis_s and basis_s in _basis_ok:
+            basis = basis_s
+        else:
+            basis = parse_price_basis_from_remark(
+                ((remark or "") + " " + (basis_s or "")).strip()
+            )
+
+        src: Dict[str, str] = {}
+        if net is not None:
+            src["unit_price"] = SOURCE_ORIGINAL
+        if p1 is not None:
+            src["price_1pct_vat"] = SOURCE_ORIGINAL
+        if p3 is not None:
+            src["price_3pct_vat"] = SOURCE_ORIGINAL
+        if p13 is not None:
+            src["price_13pct_vat"] = SOURCE_ORIGINAL
+        if pn is not None:
+            src["price_normal_invoice"] = SOURCE_ORIGINAL
+        if pr is not None:
+            src["price_reverse_invoice"] = SOURCE_ORIGINAL
+
+        return {
+            "冶炼厂名": sm,
+            "冶炼厂id": None,
+            "品类名": cat,
+            "品类id": None,
+            "价格": net,
+            "价格口径": basis,
+            "备注": remark,
+            "价格_1pct增值税": p1,
+            "价格_3pct增值税": p3,
+            "价格_13pct增值税": p13,
+            "普通发票价格": pn,
+            "反向发票价格": pr,
+            "价格字段来源": src,
+        }
+
+    def _parse_quote_excel_workbook(self, content: bytes, filename: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[str]]:
+        """解析 xlsx 首工作表为 items + full_data；若「日期」列存在且全日相同则返回 suggested_quote_date。"""
+        if not content:
+            raise ValueError("文件内容为空")
+        try:
+            import pandas as pd
+        except ImportError as e:
+            raise ValueError("服务端未安装 pandas，无法解析 Excel") from e
+
+        try:
+            df = pd.read_excel(io.BytesIO(content), engine="openpyxl", sheet_name=0)
+        except Exception as e:
+            raise ValueError(f"无法读取 Excel（须为 .xlsx）：{e}") from e
+
+        if df.empty:
+            raise ValueError("表格无数据行")
+
+        logical_to_col: Dict[str, Any] = {}
+        for c in df.columns:
+            logical = self._classify_quote_excel_column(c)
+            if not logical:
+                continue
+            if logical not in logical_to_col:
+                logical_to_col[logical] = c
+
+        if "smelter" not in logical_to_col:
+            raise ValueError("表头须包含「冶炼厂」或同义列（如冶炼厂名）")
+        if "category" not in logical_to_col:
+            raise ValueError("表头须包含「品种」或「品类名」等同义列")
+
+        items: List[Dict[str, Any]] = []
+        date_samples: List[str] = []
+        preview_rows: List[Dict[str, Any]] = []
+
+        for idx, row in df.iterrows():
+            fields: Dict[str, Any] = {}
+            for logical, col_key in logical_to_col.items():
+                val = row[col_key]
+                if pd.isna(val):
+                    continue
+                if logical == "quote_date":
+                    if hasattr(val, "strftime"):
+                        fields[logical] = val.strftime("%Y-%m-%d")
+                    else:
+                        fields[logical] = str(val).strip()[:10]
+                else:
+                    fields[logical] = val
+
+            if "smelter" not in fields or "category" not in fields:
+                continue
+            if not str(fields.get("smelter", "")).strip() or not str(
+                fields.get("category", "")
+            ).strip():
+                continue
+
+            if fields.get("quote_date"):
+                date_samples.append(str(fields["quote_date"]))
+
+            try:
+                item = self._excel_row_dict_to_confirm_item(fields)
+            except ValueError:
+                continue
+            if not any(
+                item.get(k) is not None
+                for k in (
+                    "价格",
+                    "价格_1pct增值税",
+                    "价格_3pct增值税",
+                    "价格_13pct增值税",
+                    "普通发票价格",
+                    "反向发票价格",
+                )
+            ):
+                continue
+            items.append(item)
+            preview_rows.append(
+                {
+                    "row_index": int(idx) + 2,
+                    "冶炼厂": item["冶炼厂名"],
+                    "品类": item["品类名"],
+                }
+            )
+
+        if not items:
+            raise ValueError(
+                "未解析到有效数据行：请确认每行同时有冶炼厂、品种，且至少填写一项价格列"
+            )
+
+        suggested: Optional[str] = None
+        if date_samples:
+            uniq = {d[:10] for d in date_samples if d}
+            if len(uniq) == 1:
+                suggested = next(iter(uniq))
+
+        full_data: Dict[str, Any] = {
+            "source_image": filename,
+            "file_name": filename,
+            "company_name": "",
+            "doc_title": "Excel报价列表",
+            "quote_date": suggested or "",
+            "execution_date": "",
+            "valid_period": "",
+            "price_unit": "元/吨",
+            "headers": [str(c) for c in df.columns.tolist()],
+            "rows": preview_rows[:500],
+            "policies": {},
+            "footer_notes": [],
+            "footer_notes_raw": "",
+            "brand_specifications": "",
+            "raw_full_text": "",
+            "elapsed_time": 0.0,
+        }
+        return items, full_data, suggested
+
+    def upload_price_table_excel(self, files: List[Any]) -> Dict[str, Any]:
+        """
+        解析 .xlsx 报价列表（首工作表），返回与 upload_price_table 相同结构的 data.details，
+        供前端展示并调用 confirm_price_table 写入。表头支持导出模板列名及常见同义词。
+        """
+        details: List[Dict[str, Any]] = []
+        for upload_file in files:
+            name = upload_file.filename or "upload.xlsx"
+            try:
+                content = upload_file.file.read()
+                items, full_data, suggested = self._parse_quote_excel_workbook(
+                    content, name
+                )
+                entry: Dict[str, Any] = {
+                    "file": name,
+                    "success": True,
+                    "full_data": full_data,
+                    "items": items,
+                }
+                if suggested:
+                    entry["suggested_quote_date"] = suggested
+                details.append(entry)
+            except ValueError as e:
+                details.append({"file": name, "success": False, "error": str(e)})
+            except Exception as e:
+                logger.error(f"解析报价 Excel 失败: {name} | {e}")
+                details.append({"file": name, "success": False, "error": str(e)})
+
+        return {"code": 200, "data": {"details": details}}
+
     def _map_vlm_to_confirm_items(self, result) -> List[Dict[str, Any]]:
         """将 VLM 结果映射为确认条目：图上可能是基准价或含税价（多列/备注）。此处仅带出 OCR 显式列与预览用不含税/反算（默认税率占位）；确认写入时用冶炼厂系统税率做「基准↔含税」双向统一。"""
         items = []
