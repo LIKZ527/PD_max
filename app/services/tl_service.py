@@ -55,6 +55,7 @@ from app.services.tl_dict_geo_crud import (
     warehouse_links_replace_outbound as sa_wh_links_replace_outbound,
     warehouse_links_batch_bind as sa_wh_links_batch_bind,
     warehouse_links_batch_unbind as sa_wh_links_batch_unbind,
+    warehouse_links_list_all as sa_wh_links_list_all,
     warehouse_list as sa_wh_list,
     warehouse_update as sa_wh_update,
 )
@@ -944,6 +945,76 @@ class TLService:
                     "目标库房id": it.get("toWarehouseId"),
                     "创建时间": it.get("createTime"),
                     "源库房": row,
+                }
+            )
+        return {
+            "code": 200,
+            "msg": "查询成功",
+            "list": out_rows,
+            "total": int(payload.get("total") or 0),
+            "page": int(payload.get("page") or page),
+            "size": int(payload.get("size") or size),
+        }
+
+    def get_warehouse_links_list(
+        self,
+        page: int = 1,
+        size: int = 50,
+        warehouse_id: Optional[int] = None,
+        from_warehouse_id: Optional[int] = None,
+        to_warehouse_id: Optional[int] = None,
+        keyword: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """库房关联总列表（每条含源、目标库房摘要）；可选筛选。"""
+        res = _raise_tl_geo_crud_result(
+            sa_wh_links_list_all(
+                page=page,
+                size=size,
+                warehouse_id=warehouse_id,
+                from_warehouse_id=from_warehouse_id,
+                to_warehouse_id=to_warehouse_id,
+                keyword=keyword,
+            )
+        )
+        payload = res.get("data") or {}
+        raw_list = payload.get("list") or []
+        all_types: List[str] = []
+        for it in raw_list:
+            for side in ("source", "target"):
+                w = (it.get(side) or {}) if isinstance(it.get(side), dict) else {}
+                tn = str(w.get("type") or "").strip()
+                if tn:
+                    all_types.append(tn)
+        tid_by_name = self._warehouse_type_ids_by_names(all_types)
+        tcol = self._batch_warehouse_type_colors(
+            [tid_by_name[t] for t in all_types if t in tid_by_name]
+        )
+        out_rows: List[Dict[str, Any]] = []
+        for it in raw_list:
+            src = it.get("source") or {}
+            tgt = it.get("target") or {}
+            stname = str(src.get("type") or "").strip()
+            ttname = str(tgt.get("type") or "").strip()
+            s_wt_id = tid_by_name.get(stname) if stname else None
+            t_wt_id = tid_by_name.get(ttname) if ttname else None
+            src_tl = self._site_wh_item_to_tl_row(src, tid_by_name)
+            tgt_tl = self._site_wh_item_to_tl_row(tgt, tid_by_name)
+            if s_wt_id is not None:
+                c = tcol.get(int(s_wt_id))
+                src_tl["库房类型颜色配置"] = c
+                src_tl["颜色配置"] = c
+            if t_wt_id is not None:
+                c = tcol.get(int(t_wt_id))
+                tgt_tl["库房类型颜色配置"] = c
+                tgt_tl["颜色配置"] = c
+            out_rows.append(
+                {
+                    "关联id": it.get("linkId"),
+                    "源库房id": it.get("fromWarehouseId"),
+                    "目标库房id": it.get("toWarehouseId"),
+                    "创建时间": it.get("createTime"),
+                    "源库房": src_tl,
+                    "目标库房": tgt_tl,
                 }
             )
         return {

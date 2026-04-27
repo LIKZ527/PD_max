@@ -763,6 +763,127 @@ def warehouse_links_inbound(
         return _err(CODE_DB, f"数据库操作异常: {e}")
 
 
+def _wh_side_row(r: Dict[str, Any], side: str) -> Dict[str, Any]:
+    """side 为 sf（源/from）或 st（目标/to），与 SELECT 别名一致。"""
+    return {
+        "id": r[f"{side}_id"],
+        "name": r[f"{side}_name"],
+        "province": r.get(f"{side}_province"),
+        "city": r.get(f"{side}_city"),
+        "district": r.get(f"{side}_district"),
+        "address": r.get(f"{side}_address"),
+        "warehouse_type_id": r.get(f"{side}_warehouse_type_id"),
+        "color_config": r.get(f"{side}_color_config"),
+        "longitude": r.get(f"{side}_longitude"),
+        "latitude": r.get(f"{side}_latitude"),
+        "is_active": r.get(f"{side}_is_active"),
+        "created_at": r.get(f"{side}_created_at"),
+        "updated_at": r.get(f"{side}_updated_at"),
+    }
+
+
+def warehouse_links_list_all(
+    page: int = 1,
+    size: int = 50,
+    warehouse_id: Optional[int] = None,
+    from_warehouse_id: Optional[int] = None,
+    to_warehouse_id: Optional[int] = None,
+    keyword: Optional[str] = None,
+) -> Dict[str, Any]:
+    """全部库房关联（有向边）分页列表；可选筛选涉及库房、精确源/目标、名称模糊。"""
+    try:
+        page = max(1, page)
+        size = min(200, max(1, size))
+        offset = (page - 1) * size
+
+        conds: List[str] = ["1=1"]
+        params: List[Any] = []
+
+        if warehouse_id is not None and int(warehouse_id) >= 1:
+            wid = int(warehouse_id)
+            conds.append(
+                "(l.from_warehouse_id = %s OR l.to_warehouse_id = %s)"
+            )
+            params.extend([wid, wid])
+
+        if from_warehouse_id is not None and int(from_warehouse_id) >= 1:
+            conds.append("l.from_warehouse_id = %s")
+            params.append(int(from_warehouse_id))
+
+        if to_warehouse_id is not None and int(to_warehouse_id) >= 1:
+            conds.append("l.to_warehouse_id = %s")
+            params.append(int(to_warehouse_id))
+
+        if keyword is not None and str(keyword).strip():
+            conds.append("(wf.name LIKE %s OR wt.name LIKE %s)")
+            k = f"%{str(keyword).strip()}%"
+            params.extend([k, k])
+
+        where_sql = " AND ".join(conds)
+
+        base_from = (
+            "FROM dict_warehouse_links l "
+            "INNER JOIN dict_warehouses wf ON wf.id = l.from_warehouse_id "
+            "INNER JOIN dict_warehouses wt ON wt.id = l.to_warehouse_id "
+            "LEFT JOIN dict_warehouse_types wfs ON wf.warehouse_type_id = wfs.id "
+            "LEFT JOIN dict_warehouse_types wts ON wt.warehouse_type_id = wts.id "
+            f"WHERE {where_sql}"
+        )
+
+        with get_conn() as conn:
+            with conn.cursor(DictCursor) as cur:
+                cur.execute(f"SELECT COUNT(*) AS n {base_from}", tuple(params))
+                total = int(cur.fetchone()["n"])
+
+                cur.execute(
+                    "SELECT l.id AS link_id, l.created_at AS link_created_at, "
+                    "l.from_warehouse_id, l.to_warehouse_id, "
+                    "wf.id AS sf_id, wf.name AS sf_name, wf.province AS sf_province, "
+                    "wf.city AS sf_city, wf.district AS sf_district, wf.address AS sf_address, "
+                    "wf.warehouse_type_id AS sf_warehouse_type_id, wf.color_config AS sf_color_config, "
+                    "wf.longitude AS sf_longitude, wf.latitude AS sf_latitude, wf.is_active AS sf_is_active, "
+                    "wf.created_at AS sf_created_at, wf.updated_at AS sf_updated_at, "
+                    "wfs.name AS sf_type_name, "
+                    "wt.id AS st_id, wt.name AS st_name, wt.province AS st_province, "
+                    "wt.city AS st_city, wt.district AS st_district, wt.address AS st_address, "
+                    "wt.warehouse_type_id AS st_warehouse_type_id, wt.color_config AS st_color_config, "
+                    "wt.longitude AS st_longitude, wt.latitude AS st_latitude, wt.is_active AS st_is_active, "
+                    "wt.created_at AS st_created_at, wt.updated_at AS st_updated_at, "
+                    "wts.name AS st_type_name "
+                    f"{base_from} "
+                    "ORDER BY l.id DESC LIMIT %s OFFSET %s",
+                    tuple(params + [size, offset]),
+                )
+                rows = cur.fetchall()
+
+        items: List[Dict[str, Any]] = []
+        for r in rows:
+            items.append(
+                {
+                    "linkId": int(r["link_id"]),
+                    "fromWarehouseId": int(r["from_warehouse_id"]),
+                    "toWarehouseId": int(r["to_warehouse_id"]),
+                    "createTime": _fmt_ts(r.get("link_created_at")),
+                    "source": _warehouse_row_api(
+                        _wh_side_row(r, "sf"),
+                        r.get("sf_type_name"),
+                    ),
+                    "target": _warehouse_row_api(
+                        _wh_side_row(r, "st"),
+                        r.get("st_type_name"),
+                    ),
+                }
+            )
+
+        return _ok(
+            "查询成功",
+            data={"list": items, "total": total, "page": page, "size": size},
+        )
+    except Exception as e:
+        logger.exception("查询库房关联列表失败")
+        return _err(CODE_DB, f"数据库操作异常: {e}")
+
+
 def warehouse_links_replace_outbound(from_wh_id: int, to_wh_ids: List[int]) -> Dict[str, Any]:
     """将 from 的所有出边替换为指向 to_wh_ids（去重、忽略自环、目标须存在）。"""
     try:
