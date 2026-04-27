@@ -174,6 +174,22 @@ TABLE_STATEMENTS = [
         INDEX idx_wh_geo_region (province, city, district)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='仓库字典表';
     """,
+    # 库房单向关联边表（有向图：from -> to，一个源可连多条出边）
+    """
+    CREATE TABLE IF NOT EXISTS dict_warehouse_links (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '边ID',
+        from_warehouse_id INT NOT NULL COMMENT '源库房（出边起点）',
+        to_warehouse_id INT NOT NULL COMMENT '目标库房（单向指向）',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+        UNIQUE KEY uk_wh_link_from_to (from_warehouse_id, to_warehouse_id),
+        INDEX idx_wh_link_from (from_warehouse_id),
+        INDEX idx_wh_link_to (to_warehouse_id),
+        CONSTRAINT fk_wh_link_from FOREIGN KEY (from_warehouse_id)
+            REFERENCES dict_warehouses (id) ON DELETE CASCADE ON UPDATE CASCADE,
+        CONSTRAINT fk_wh_link_to FOREIGN KEY (to_warehouse_id)
+            REFERENCES dict_warehouses (id) ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='库房单向关联（有向图边）';
+    """,
     # 冶炼厂字典表
     """
     CREATE TABLE IF NOT EXISTS dict_factories (
@@ -1040,6 +1056,39 @@ def create_tables() -> None:
         ensure_dict_factories_geo_region_columns()
     except Exception:
         logger.exception("检查/添加 dict_factories 省市区与经纬度失败")
+    try:
+        ensure_dict_warehouse_links_table()
+    except Exception:
+        logger.exception("检查/创建 dict_warehouse_links 库房关联边表失败")
+
+
+def ensure_dict_warehouse_links_table() -> None:
+    """库房单向关联边表（新库由 TABLE_STATEMENTS 创建；旧库补建）。"""
+    config_dict = get_mysql_config()
+    connection = pymysql.connect(**config_dict)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dict_warehouse_links (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '边ID',
+                    from_warehouse_id INT NOT NULL COMMENT '源库房（出边起点）',
+                    to_warehouse_id INT NOT NULL COMMENT '目标库房（单向指向）',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                    UNIQUE KEY uk_wh_link_from_to (from_warehouse_id, to_warehouse_id),
+                    INDEX idx_wh_link_from (from_warehouse_id),
+                    INDEX idx_wh_link_to (to_warehouse_id),
+                    CONSTRAINT fk_wh_link_from FOREIGN KEY (from_warehouse_id)
+                        REFERENCES dict_warehouses (id) ON DELETE CASCADE ON UPDATE CASCADE,
+                    CONSTRAINT fk_wh_link_to FOREIGN KEY (to_warehouse_id)
+                        REFERENCES dict_warehouses (id) ON DELETE CASCADE ON UPDATE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='库房单向关联（有向图边）';
+                """
+            )
+        connection.commit()
+        logger.info("dict_warehouse_links 表已就绪")
+    finally:
+        connection.close()
 
 
 def init_default_data() -> None:

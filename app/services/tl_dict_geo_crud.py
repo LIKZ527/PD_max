@@ -10,7 +10,7 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -24,6 +24,7 @@ CODE_OK = 0
 CODE_VALIDATION = 1001
 CODE_NOT_FOUND = 1002
 CODE_DUP_NAME = 1003
+CODE_DUP_LINK = 1004
 CODE_DB = 2001
 CODE_INTERNAL = 5000
 
@@ -249,6 +250,11 @@ def warehouse_delete(wh_id: int) -> Dict[str, Any]:
                 cur.execute(
                     "UPDATE dict_warehouses SET is_active = 0 WHERE id = %s",
                     (wh_id,),
+                )
+                cur.execute(
+                    "DELETE FROM dict_warehouse_links WHERE from_warehouse_id = %s "
+                    "OR to_warehouse_id = %s",
+                    (wh_id, wh_id),
                 )
             conn.commit()
         return _ok("删除成功", data=None)
@@ -488,6 +494,341 @@ def warehouse_get(wh_id: int) -> Dict[str, Any]:
         return _ok("查询成功", data=_warehouse_row_api(row, row.get("type_name")))
     except Exception as e:
         logger.exception("查询仓库详情失败")
+        return _err(CODE_DB, f"数据库操作异常: {e}")
+
+
+def _link_out_item(
+    link_id: int,
+    from_id: int,
+    to_id: int,
+    created_at: Any,
+    target_row: Dict[str, Any],
+    target_type_name: Optional[str],
+) -> Dict[str, Any]:
+    """出库关联列表单项：指向目标库房的边。"""
+    tw = _warehouse_row_api(target_row, target_type_name)
+    return {
+        "linkId": int(link_id),
+        "fromWarehouseId": int(from_id),
+        "toWarehouseId": int(to_id),
+        "createTime": _fmt_ts(created_at),
+        "target": tw,
+    }
+
+
+def _link_in_item(
+    link_id: int,
+    from_id: int,
+    to_id: int,
+    created_at: Any,
+    source_row: Dict[str, Any],
+    source_type_name: Optional[str],
+) -> Dict[str, Any]:
+    """入库关联列表单项：来自源库房的边。"""
+    sw = _warehouse_row_api(source_row, source_type_name)
+    return {
+        "linkId": int(link_id),
+        "fromWarehouseId": int(from_id),
+        "toWarehouseId": int(to_id),
+        "createTime": _fmt_ts(created_at),
+        "source": sw,
+    }
+
+
+def warehouse_link_bind(from_wh_id: int, to_wh_id: int) -> Dict[str, Any]:
+    """新增一条有向边 from -> to（幂等重复边返回 CODE_DUP_LINK）。"""
+    try:
+        if from_wh_id < 1 or to_wh_id < 1:
+            return _err(CODE_VALIDATION, "库房 id 无效")
+        if from_wh_id == to_wh_id:
+            return _err(CODE_VALIDATION, "不能将库房关联到自身")
+
+        with get_conn() as conn:
+            with conn.cursor(DictCursor) as cur:
+                cur.execute(
+                    "SELECT id FROM dict_warehouses WHERE id IN (%s,%s)",
+                    (from_wh_id, to_wh_id),
+                )
+                found = {int(r["id"]) for r in cur.fetchall()}
+                if from_wh_id not in found:
+                    return _err(CODE_NOT_FOUND, "源库房不存在")
+                if to_wh_id not in found:
+                    return _err(CODE_NOT_FOUND, "目标库房不存在")
+
+                cur.execute(
+                    "SELECT id FROM dict_warehouse_links "
+                    "WHERE from_warehouse_id = %s AND to_warehouse_id = %s",
+                    (from_wh_id, to_wh_id),
+                )
+                if cur.fetchone():
+                    return _err(CODE_DUP_LINK, "该单向关联已存在")
+
+                cur.execute(
+                    "INSERT INTO dict_warehouse_links (from_warehouse_id, to_warehouse_id) "
+                    "VALUES (%s,%s)",
+                    (from_wh_id, to_wh_id),
+                )
+                lid = cur.lastrowid
+                conn.commit()
+
+                cur.execute(
+                    "SELECT id, from_warehouse_id, to_warehouse_id, created_at "
+                    "FROM dict_warehouse_links WHERE id = %s",
+                    (lid,),
+                )
+                lk = cur.fetchone()
+        return _ok(
+            "绑定成功",
+            data={
+                "linkId": int(lk["id"]),
+                "fromWarehouseId": int(lk["from_warehouse_id"]),
+                "toWarehouseId": int(lk["to_warehouse_id"]),
+                "createTime": _fmt_ts(lk.get("created_at")),
+            },
+        )
+    except pymysql.IntegrityError:
+        return _err(CODE_DUP_LINK, "该单向关联已存在")
+    except Exception as e:
+        logger.exception("库房关联绑定失败")
+        return _err(CODE_DB, f"数据库操作异常: {e}")
+
+
+def warehouse_link_unbind(from_wh_id: int, to_wh_id: int) -> Dict[str, Any]:
+    """删除有向边 from -> to。"""
+    try:
+        if from_wh_id < 1 or to_wh_id < 1:
+            return _err(CODE_VALIDATION, "库房 id 无效")
+
+        with get_conn() as conn:
+            with conn.cursor(DictCursor) as cur:
+                cur.execute(
+                    "DELETE FROM dict_warehouse_links WHERE from_warehouse_id = %s "
+                    "AND to_warehouse_id = %s",
+                    (from_wh_id, to_wh_id),
+                )
+                deleted = cur.rowcount
+                conn.commit()
+        if deleted == 0:
+            return _err(CODE_NOT_FOUND, "关联不存在")
+        return _ok("解绑成功", data=None)
+    except Exception as e:
+        logger.exception("库房关联解绑失败")
+        return _err(CODE_DB, f"数据库操作异常: {e}")
+
+
+def warehouse_links_outbound(
+    warehouse_id: int,
+    page: int = 1,
+    size: int = 50,
+) -> Dict[str, Any]:
+    """某库房的所有出边（指向哪些库房）。"""
+    try:
+        if warehouse_id < 1:
+            return _err(CODE_VALIDATION, "库房 id 无效")
+        page = max(1, page)
+        size = min(200, max(1, size))
+        offset = (page - 1) * size
+
+        with get_conn() as conn:
+            with conn.cursor(DictCursor) as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM dict_warehouse_links WHERE from_warehouse_id = %s",
+                    (warehouse_id,),
+                )
+                total = int(cur.fetchone()["n"])
+
+                cur.execute(
+                    "SELECT l.id AS link_id, l.from_warehouse_id, l.to_warehouse_id, "
+                    "l.created_at AS link_created_at, "
+                    "dw.id AS wh_id, dw.name AS wh_name, dw.province, dw.city, dw.district, "
+                    "dw.address, dw.warehouse_type_id, dw.color_config, "
+                    "dw.longitude, dw.latitude, dw.is_active, dw.created_at, dw.updated_at, "
+                    "wt.name AS type_name "
+                    "FROM dict_warehouse_links l "
+                    "JOIN dict_warehouses dw ON dw.id = l.to_warehouse_id "
+                    "LEFT JOIN dict_warehouse_types wt ON dw.warehouse_type_id = wt.id "
+                    "WHERE l.from_warehouse_id = %s "
+                    "ORDER BY l.id DESC LIMIT %s OFFSET %s",
+                    (warehouse_id, size, offset),
+                )
+                rows = cur.fetchall()
+
+        items = []
+        for r in rows:
+            tw = {
+                "id": r["wh_id"],
+                "name": r["wh_name"],
+                "province": r.get("province"),
+                "city": r.get("city"),
+                "district": r.get("district"),
+                "address": r.get("address"),
+                "warehouse_type_id": r.get("warehouse_type_id"),
+                "color_config": r.get("color_config"),
+                "longitude": r.get("longitude"),
+                "latitude": r.get("latitude"),
+                "is_active": r.get("is_active"),
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+            }
+            items.append(
+                _link_out_item(
+                    int(r["link_id"]),
+                    int(r["from_warehouse_id"]),
+                    int(r["to_warehouse_id"]),
+                    r.get("link_created_at"),
+                    tw,
+                    r.get("type_name"),
+                )
+            )
+
+        return _ok(
+            "查询成功",
+            data={"list": items, "total": total, "page": page, "size": size},
+        )
+    except Exception as e:
+        logger.exception("查询库房出边列表失败")
+        return _err(CODE_DB, f"数据库操作异常: {e}")
+
+
+def warehouse_links_inbound(
+    warehouse_id: int,
+    page: int = 1,
+    size: int = 50,
+) -> Dict[str, Any]:
+    """某库房的所有入边（被哪些库房指向）。"""
+    try:
+        if warehouse_id < 1:
+            return _err(CODE_VALIDATION, "库房 id 无效")
+        page = max(1, page)
+        size = min(200, max(1, size))
+        offset = (page - 1) * size
+
+        with get_conn() as conn:
+            with conn.cursor(DictCursor) as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM dict_warehouse_links WHERE to_warehouse_id = %s",
+                    (warehouse_id,),
+                )
+                total = int(cur.fetchone()["n"])
+
+                cur.execute(
+                    "SELECT l.id AS link_id, l.from_warehouse_id, l.to_warehouse_id, "
+                    "l.created_at AS link_created_at, "
+                    "dw.id AS wh_id, dw.name AS wh_name, dw.province, dw.city, dw.district, "
+                    "dw.address, dw.warehouse_type_id, dw.color_config, "
+                    "dw.longitude, dw.latitude, dw.is_active, dw.created_at, dw.updated_at, "
+                    "wt.name AS type_name "
+                    "FROM dict_warehouse_links l "
+                    "JOIN dict_warehouses dw ON dw.id = l.from_warehouse_id "
+                    "LEFT JOIN dict_warehouse_types wt ON dw.warehouse_type_id = wt.id "
+                    "WHERE l.to_warehouse_id = %s "
+                    "ORDER BY l.id DESC LIMIT %s OFFSET %s",
+                    (warehouse_id, size, offset),
+                )
+                rows = cur.fetchall()
+
+        items = []
+        for r in rows:
+            sw = {
+                "id": r["wh_id"],
+                "name": r["wh_name"],
+                "province": r.get("province"),
+                "city": r.get("city"),
+                "district": r.get("district"),
+                "address": r.get("address"),
+                "warehouse_type_id": r.get("warehouse_type_id"),
+                "color_config": r.get("color_config"),
+                "longitude": r.get("longitude"),
+                "latitude": r.get("latitude"),
+                "is_active": r.get("is_active"),
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+            }
+            items.append(
+                _link_in_item(
+                    int(r["link_id"]),
+                    int(r["from_warehouse_id"]),
+                    int(r["to_warehouse_id"]),
+                    r.get("link_created_at"),
+                    sw,
+                    r.get("type_name"),
+                )
+            )
+        return _ok(
+            "查询成功",
+            data={"list": items, "total": total, "page": page, "size": size},
+        )
+    except Exception as e:
+        logger.exception("查询库房入边列表失败")
+        return _err(CODE_DB, f"数据库操作异常: {e}")
+
+
+def warehouse_links_replace_outbound(from_wh_id: int, to_wh_ids: List[int]) -> Dict[str, Any]:
+    """将 from 的所有出边替换为指向 to_wh_ids（去重、忽略自环、目标须存在）。"""
+    try:
+        if from_wh_id < 1:
+            return _err(CODE_VALIDATION, "源库房 id 无效")
+
+        uniq: List[int] = []
+        seen: Set[int] = set()
+        for x in to_wh_ids:
+            try:
+                tid = int(x)
+            except (TypeError, ValueError):
+                return _err(CODE_VALIDATION, "目标库房 id 列表无效")
+            if tid < 1:
+                return _err(CODE_VALIDATION, "目标库房 id 无效")
+            if tid == from_wh_id:
+                continue
+            if tid in seen:
+                continue
+            seen.add(tid)
+            uniq.append(tid)
+
+        with get_conn() as conn:
+            with conn.cursor(DictCursor) as cur:
+                cur.execute(
+                    "SELECT id FROM dict_warehouses WHERE id = %s",
+                    (from_wh_id,),
+                )
+                if not cur.fetchone():
+                    return _err(CODE_NOT_FOUND, "源库房不存在")
+
+                if uniq:
+                    ph = ",".join(["%s"] * len(uniq))
+                    cur.execute(
+                        f"SELECT id FROM dict_warehouses WHERE id IN ({ph})",
+                        tuple(uniq),
+                    )
+                    ok_ids = {int(r["id"]) for r in cur.fetchall()}
+                    missing = [i for i in uniq if i not in ok_ids]
+                    if missing:
+                        return _err(
+                            CODE_NOT_FOUND,
+                            f"目标库房不存在: {missing}",
+                        )
+
+                cur.execute(
+                    "DELETE FROM dict_warehouse_links WHERE from_warehouse_id = %s",
+                    (from_wh_id,),
+                )
+                for tid in uniq:
+                    cur.execute(
+                        "INSERT INTO dict_warehouse_links (from_warehouse_id, to_warehouse_id) "
+                        "VALUES (%s,%s)",
+                        (from_wh_id, tid),
+                    )
+                conn.commit()
+
+        return _ok(
+            "替换成功",
+            data={"fromWarehouseId": from_wh_id, "toWarehouseIds": uniq},
+        )
+    except pymysql.IntegrityError as e:
+        logger.warning("替换出边触发约束: %s", e)
+        return _err(CODE_DB, f"数据库操作异常: {e}")
+    except Exception as e:
+        logger.exception("替换库房出边失败")
         return _err(CODE_DB, f"数据库操作异常: {e}")
 
 

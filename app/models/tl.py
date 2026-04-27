@@ -222,6 +222,27 @@ class AddWarehouseRequest(BaseModel):
     )
 
 
+class WarehouseLinkBindRequest(BaseModel):
+    """库房单向关联：新增一条有向边（源 → 目标）"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    源库房id: int = Field(..., ge=1, description="出边起点库房 id")
+    目标库房id: int = Field(..., ge=1, description="出边终点库房 id")
+
+
+class WarehouseLinksReplaceOutboundRequest(BaseModel):
+    """将某库房的全部出边替换为目标列表（整体覆盖，用于「改」）"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    源库房id: int = Field(..., ge=1, description="出边起点库房 id")
+    目标库房id列表: List[int] = Field(
+        default_factory=list,
+        description="替换后的目标库房 id 列表；空列表表示清空该库房全部出边",
+    )
+
+
 class UpdateWarehouseRequest(BaseModel):
     """修改仓库请求体"""
     仓库id: int = Field(..., description="仓库ID")

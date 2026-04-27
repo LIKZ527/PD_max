@@ -9,7 +9,10 @@ TL比价模块路由
   1b.POST /tl/update_warehouse         - 修改仓库信息
   1c.DELETE /tl/delete_warehouse        - 删除仓库（软删除）
   1c2.DELETE /tl/purge_warehouse        - 永久删除仓库（硬删除）
-  1d.POST /tl/add_smelter              - 新建冶炼厂
+  1d.库房单向关联（有向图）：POST /tl/bind_warehouse_link、DELETE /tl/unbind_warehouse_link、
+      GET /tl/get_warehouse_links_outbound、GET /tl/get_warehouse_links_inbound、
+      PUT /tl/replace_warehouse_links_outbound
+  1e.POST /tl/add_smelter              - 新建冶炼厂
   2. GET  /tl/get_smelters             - 获取冶炼厂列表（size 最大 200）
   2c2.DELETE /tl/purge_smelter         - 永久删除冶炼厂（硬删除；默认级联删运费/报价等；?cascade=false 为严格仅删厂）
   3. GET  /tl/get_categories           - 获取品类列表
@@ -58,6 +61,8 @@ from app.models.tl import (
     AddWarehouseRequest,
     AddWarehouseTypeRequest,
     UpdateWarehouseRequest,
+    WarehouseLinkBindRequest,
+    WarehouseLinksReplaceOutboundRequest,
     UpdateWarehouseTypeRequest,
     AddSmelterRequest,
     UploadVarietyRequest,
@@ -459,7 +464,104 @@ def purge_warehouse(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ===================== 接口1d：新建冶炼厂 =====================
+def _tl_value_error_http(e: ValueError) -> HTTPException:
+    detail = str(e)
+    if "不存在" in detail or "关联不存在" in detail:
+        return HTTPException(status_code=404, detail=detail)
+    return HTTPException(status_code=400, detail=detail)
+
+
+# ===================== 接口1d：库房单向关联（有向图）====================
+
+@router.post("/bind_warehouse_link", summary="绑定库房单向关联（新增出边）")
+def bind_warehouse_link(
+    body: WarehouseLinkBindRequest,
+    service: TLService = Depends(get_tl_service),
+):
+    """一条有向边：源库房 → 目标库房；重复绑定返回错误。"""
+    try:
+        return service.bind_warehouse_link(body.源库房id, body.目标库房id)
+    except ValueError as e:
+        raise _tl_value_error_http(e)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/unbind_warehouse_link", summary="解绑库房单向关联（删除出边）")
+def unbind_warehouse_link(
+    from_warehouse_id: int = Query(..., ge=1, description="源库房 id"),
+    to_warehouse_id: int = Query(..., ge=1, description="目标库房 id"),
+    service: TLService = Depends(get_tl_service),
+):
+    """删除 ``from_warehouse_id → to_warehouse_id`` 这一条边。"""
+    try:
+        return service.unbind_warehouse_link(from_warehouse_id, to_warehouse_id)
+    except ValueError as e:
+        raise _tl_value_error_http(e)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/get_warehouse_links_outbound", summary="列出库房出边（指向哪些库房）")
+def get_warehouse_links_outbound(
+    warehouse_id: int = Query(..., ge=1, description="库房 id"),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    service: TLService = Depends(get_tl_service),
+):
+    """分页返回该库房作为起点的全部有向边及目标库房摘要。"""
+    try:
+        return service.get_warehouse_links_outbound(warehouse_id, page=page, size=size)
+    except ValueError as e:
+        raise _tl_value_error_http(e)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/get_warehouse_links_inbound", summary="列出库房入边（被哪些库房指向）")
+def get_warehouse_links_inbound(
+    warehouse_id: int = Query(..., ge=1, description="库房 id"),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    service: TLService = Depends(get_tl_service),
+):
+    """分页返回以该库房为终点的全部有向边及源库房摘要。"""
+    try:
+        return service.get_warehouse_links_inbound(warehouse_id, page=page, size=size)
+    except ValueError as e:
+        raise _tl_value_error_http(e)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/replace_warehouse_links_outbound", summary="替换库房全部出边（覆盖式修改）")
+def replace_warehouse_links_outbound(
+    body: WarehouseLinksReplaceOutboundRequest,
+    service: TLService = Depends(get_tl_service),
+):
+    """删除该源库房的全部出边后，按列表重建；空列表等价于清空出边。"""
+    try:
+        return service.replace_warehouse_links_outbound(
+            body.源库房id,
+            body.目标库房id列表,
+        )
+    except ValueError as e:
+        raise _tl_value_error_http(e)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===================== 接口1e：新建冶炼厂 =====================
 
 @router.post("/add_smelter", summary="新建冶炼厂")
 def add_smelter(
