@@ -136,3 +136,10 @@ AI_DETECTION_ENABLED = _env_enabled("AI_DETECTION_ENABLED", default=True)
 
 # 为 0 时不注册智能预测相关路由、不连 Redis 预热线程、不启动定时预测调度
 INTELLIGENT_PREDICTION_ENABLED = _env_enabled("INTELLIGENT_PREDICTION_ENABLED", default=True)
+
+# 启用「循融宝发货」的冶炼厂在比价/采购建议中货物单价加价（元/吨）；默认 80，可用环境变量覆盖
+try:
+    _xrb = (os.getenv("XUNRONGBAO_SHIPPING_PREMIUM_PER_TON", "") or "80").strip() or "80"
+    XUNRONGBAO_SHIPPING_PREMIUM_PER_TON = float(_xrb)
+except ValueError:
+    XUNRONGBAO_SHIPPING_PREMIUM_PER_TON = 80.0
