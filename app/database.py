@@ -1092,22 +1092,17 @@ def ensure_dict_warehouse_links_table() -> None:
 
 
 def init_default_data() -> None:
-    """插入默认的仓库和冶炼厂数据"""
+    """插入默认的冶炼厂数据"""
     connection = pymysql.connect(**get_mysql_config())
     try:
         with connection.cursor() as cursor:
-            # 插入默认仓库
-            cursor.execute(
-                "INSERT IGNORE INTO dict_warehouses (id, name, is_active) VALUES "
-                "(1, '默认仓库', 1)"
-            )
             # 插入默认冶炼厂
             cursor.execute(
                 "INSERT IGNORE INTO dict_factories (id, name, is_active) VALUES "
                 "(1, '默认冶炼厂', 1)"
             )
         connection.commit()
-        logger.info("默认数据初始化完成")
+        logger.info("默认冶炼厂初始化完成")
     finally:
         connection.close()
 
