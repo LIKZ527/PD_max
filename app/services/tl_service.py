@@ -2738,6 +2738,63 @@ class TLService:
         }
         return items, full_data, suggested
 
+    def build_quote_list_import_template_excel(self) -> bytes:
+        """
+        生成报价列表 xlsx 导入模板：首表「导入数据」表头与 export_quote_details_excel / upload_price_table_excel
+        对齐；附「填写说明」工作表。
+        """
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font
+        except ImportError as e:
+            raise ValueError("服务端未安装 openpyxl，无法生成 Excel") from e
+
+        wb = Workbook()
+        ws = wb.active
+        assert ws is not None
+        ws.title = "导入数据"
+        headers = [
+            "日期",
+            "冶炼厂",
+            "品种",
+            "基准价",
+            "3%含税价",
+            "13%含税价",
+            "备注",
+            "价格口径",
+        ]
+        ws.append(headers)
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+        ws.freeze_panes = "A2"
+        for col_letter, width in (
+            ("A", 12),
+            ("B", 18),
+            ("C", 18),
+            ("D", 12),
+            ("E", 12),
+            ("F", 12),
+            ("G", 28),
+            ("H", 14),
+        ):
+            ws.column_dimensions[col_letter].width = width
+
+        ws2 = wb.create_sheet("填写说明", 1)
+        hints = [
+            "1. 首行表头请勿修改；数据从第 2 行填写。填好后使用 POST /tl/upload_price_table_excel 上传本表。",
+            "2. 「冶炼厂」须与系统「冶炼厂」字典中的名称完全一致；「品种」为品类名称（可新建）。",
+            "3. 「日期」格式 YYYY-MM-DD；若多行日期相同，上传接口可返回 suggested_quote_date 供确认写入时选用。",
+            "4. 至少填写一项价格列（如基准价或 3%/13% 含税价）；「价格口径」可填 ex_vat、incl_3pct 等，亦可留空由备注推断。",
+            "5. 更多同义表头见 upload_price_table_excel 接口说明（与「报价数据导出」列名兼容）。",
+        ]
+        for i, line in enumerate(hints, start=1):
+            ws2.cell(row=i, column=1, value=line)
+        ws2.column_dimensions["A"].width = 96
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
     def upload_price_table_excel(self, files: List[Any]) -> Dict[str, Any]:
         """
         解析 .xlsx 报价列表（首工作表），返回与 upload_price_table 相同结构的 data.details，

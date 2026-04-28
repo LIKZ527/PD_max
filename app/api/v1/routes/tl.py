@@ -20,7 +20,8 @@ TL比价模块路由
   3b.POST /tl/upload_variety           - 上传品种（批量写入 dict_categories）
   4. POST /tl/get_comparison           - 获取比价表
   5. POST /tl/upload_price_table       - 上传价格表（OCR识别，返回原始识别结果）
-  5a.POST /tl/upload_price_table_excel - 上传报价列表（xlsx 解析，返回 items/full_data 供确认写入）
+  5a1.GET /tl/download_quote_list_template_excel - 下载报价列表导入模板（xlsx）
+  5a2.POST /tl/upload_price_table_excel - 上传报价列表（xlsx 解析，返回 items/full_data 供确认写入）
   5b.POST /tl/confirm_price_table      - 确认写入报价数据（冶炼厂须字典名称精确匹配；品类缺失仍可自动新建）
   5b2.POST /tl/manual_quote            - 手写录入报价（无 OCR；请求体与 confirm 相同，full_data 可省略）
   5b3.POST /tl/update_quote_detail     - 按明细 id 修改报价（改价后按冶炼厂税率重算各档含税价）
@@ -912,11 +913,32 @@ def upload_price_table(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/download_quote_list_template_excel", summary="下载报价列表导入模板（xlsx）")
+def download_quote_list_template_excel(
+    service: TLService = Depends(get_tl_service),
+):
+    """表头与「报价数据导出」及 upload_price_table_excel 解析规则对齐；含「填写说明」工作表。"""
+    try:
+        data = service.build_quote_list_import_template_excel()
+        fn = "报价列表导入模板.xlsx"
+        return StreamingResponse(
+            io.BytesIO(data),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(fn)}",
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/upload_price_table_excel", summary="上传报价列表（Excel xlsx）")
 def upload_price_table_excel(
     file: List[UploadFile] = File(
         ...,
-        description="报价列表 .xlsx，可多文件；读取首工作表。表头须含冶炼厂、品种（品类）及至少一列价格；与 export_quote_details_excel 导出列兼容",
+        description="报价列表 .xlsx，可多文件；读取首工作表「导入数据」或同结构表。可由 GET /tl/download_quote_list_template_excel 下载模板填写",
     ),
     service: TLService = Depends(get_tl_service),
 ):
