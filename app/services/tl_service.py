@@ -1923,6 +1923,19 @@ class TLService:
                     sm_ph = ",".join(["%s"] * len(smelter_ids))
                     cat_ph = ",".join(["%s"] * len(category_ids))
 
+                    cur.execute(
+                        f"SELECT id FROM dict_factories WHERE id IN ({sm_ph}) AND is_active = 1",
+                        tuple(smelter_ids),
+                    )
+                    smelter_ids = [int(row[0]) for row in cur.fetchall()]
+                    if not smelter_ids:
+                        return {
+                            "明细": [],
+                            "冶炼厂利润排行": [],
+                            "最优价排序口径": sort_basis,
+                        }
+                    sm_ph = ",".join(["%s"] * len(smelter_ids))
+
                     # 品类主名称（用于展示）
                     cur.execute(
                         f"SELECT DISTINCT category_id, "
@@ -3740,10 +3753,20 @@ class TLService:
         """
         if not factory_ids:
             return {}
-        fac_ph = ",".join(["%s"] * len(factory_ids))
+        input_factory_ids = sorted({int(fid) for fid in factory_ids})
+        fac_ph = ",".join(["%s"] * len(input_factory_ids))
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT id FROM dict_factories WHERE id IN ({fac_ph}) AND is_active = 1",
+                        tuple(input_factory_ids),
+                    )
+                    active_factory_ids = [int(row[0]) for row in cur.fetchall()]
+                    if not active_factory_ids:
+                        return {}
+                    fac_ph = ",".join(["%s"] * len(active_factory_ids))
+
                     cur.execute(
                         "SELECT category_id, name FROM dict_categories "
                         "WHERE is_active = 1 ORDER BY category_id, is_main DESC, row_id"
@@ -3774,7 +3797,7 @@ class TLService:
                            AND qd.quote_date = t.mq
                         WHERE qd.factory_id IN ({fac_ph})
                         """,
-                        tuple(factory_ids) + tuple(factory_ids),
+                        tuple(active_factory_ids) + tuple(active_factory_ids),
                     )
                     # (fid, name) -> (quote_date, unit, p3, p13)
                     latest_by_pair: Dict[Tuple[int, str], Tuple[Any, Any, Any, Any]] = {}
@@ -3787,10 +3810,10 @@ class TLService:
                         )
 
             out: Dict[int, List[Dict[str, Any]]] = {
-                int(fid): [] for fid in factory_ids
+                int(fid): [] for fid in active_factory_ids
             }
             sorted_cids = sorted(cat_id_to_names.keys())
-            for fid in factory_ids:
+            for fid in active_factory_ids:
                 for cid in sorted_cids:
                     display = cat_id_main.get(cid, cat_id_to_names[cid][0])
                     best: Optional[Tuple[Any, Any, Any, Any]] = None
@@ -4156,7 +4179,7 @@ class TLService:
         base_from = (
             "FROM quote_details qd "
             "JOIN dict_factories df ON qd.factory_id = df.id "
-            f"WHERE {where_sql}"
+            f"WHERE df.is_active = 1 AND {where_sql}"
         )
         try:
             with get_conn() as conn:
@@ -4244,7 +4267,7 @@ class TLService:
         base_from = (
             "FROM quote_details qd "
             "JOIN dict_factories df ON qd.factory_id = df.id "
-            f"WHERE {where_sql}"
+            f"WHERE df.is_active = 1 AND {where_sql}"
         )
         try:
             from openpyxl import Workbook
