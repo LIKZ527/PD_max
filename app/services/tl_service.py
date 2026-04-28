@@ -2522,6 +2522,59 @@ class TLService:
                 return (cat_id, row_id)
         return None
 
+    def _resolve_quote_category_main_name(
+        self,
+        cur: Any,
+        raw_name: Any,
+        *,
+        allow_create: bool,
+    ) -> Tuple[str, int]:
+        """
+        报价落库前将识别/录入的品类名归一到启用主名称。
+
+        - 命中启用别名：返回同 category_id 下的启用主名称；
+        - 命中停用别名：拒绝写入；
+        - 未命中：按现有确认报价逻辑可新建为主名称（allow_create=True）。
+        """
+        cat_name = str(raw_name or "").strip()
+        if not cat_name:
+            raise ValueError("品类名不能为空")
+
+        cur.execute(
+            "SELECT row_id, category_id, is_active FROM dict_categories WHERE name = %s",
+            (cat_name,),
+        )
+        row = cur.fetchone()
+        if row:
+            _row_id, category_id, is_active = row
+            if is_active != 1:
+                raise ValueError(
+                    f"品类「{cat_name}」已停用，请先在品类管理中启用后再写入报价。"
+                )
+            cur.execute(
+                "SELECT name FROM dict_categories "
+                "WHERE category_id = %s AND is_active = 1 "
+                "ORDER BY is_main DESC, row_id ASC LIMIT 1",
+                (category_id,),
+            )
+            main_row = cur.fetchone()
+            if not main_row or not str(main_row[0]).strip():
+                raise ValueError(f"品类「{cat_name}」所在分组没有启用名称，请先维护品类。")
+            return str(main_row[0]).strip(), int(category_id)
+
+        if not allow_create:
+            raise ValueError(f"品类不存在或未启用: {cat_name}")
+
+        cur.execute("SELECT COALESCE(MAX(category_id), 0) + 1 FROM dict_categories")
+        new_cat_id = int(cur.fetchone()[0])
+        cur.execute(
+            "INSERT INTO dict_categories "
+            "(category_id, name, is_main, is_active) "
+            "VALUES (%s, %s, 1, 1)",
+            (new_cat_id, cat_name),
+        )
+        return cat_name, new_cat_id
+
     def upload_price_table(self, files: List[Any]) -> Dict[str, Any]:
         saved_paths: List[Tuple[str, str, str]] = []
         try:
@@ -3124,31 +3177,17 @@ class TLService:
                                     f"冶炼厂 id={fid} 已停用，无法写入报价；请启用后重试。"
                                 )
 
-                        # 2. 品类：报价只能写入启用中的品类；停用品类不在确认时自动恢复
-                        cat_name = str(item["品类名"]).strip()
-                        if not cat_name:
-                            raise ValueError("品类名不能为空")
-                        cur.execute(
-                            "SELECT row_id, is_active FROM dict_categories WHERE name = %s",
-                            (cat_name,),
+                        # 2. 品类：别名归一到启用主名称后落库；停用品类不在确认时自动恢复
+                        original_cat_name = str(item["品类名"]).strip()
+                        main_cat_name, category_id = self._resolve_quote_category_main_name(
+                            cur,
+                            original_cat_name,
+                            allow_create=True,
                         )
-                        row = cur.fetchone()
-                        if row:
-                            _rid, is_active = row
-                            if is_active != 1:
-                                raise ValueError(
-                                    f"品类「{cat_name}」已停用，请先在品类管理中启用后再写入报价。"
-                                )
-                        else:
-                            cur.execute("SELECT COALESCE(MAX(category_id), 0) + 1 FROM dict_categories")
-                            new_cat_id = cur.fetchone()[0]
-                            cur.execute(
-                                "INSERT INTO dict_categories "
-                                "(category_id, name, is_main, is_active) "
-                                "VALUES (%s, %s, 1, 1)",
-                                (new_cat_id, cat_name),
-                            )
-                        item["品类名"] = cat_name
+                        item["品类名"] = main_cat_name
+                        item["品类id"] = category_id
+                        if original_cat_name and original_cat_name != main_cat_name:
+                            item["识别品类名"] = original_cat_name
 
                     # 3. 存储全量元数据（如果有 full_data）
                     metadata_id = None
@@ -3285,6 +3324,8 @@ class TLService:
                             {
                                 "冶炼厂id": item["冶炼厂id"],
                                 "品类名": item["品类名"],
+                                "品类id": item.get("品类id"),
+                                "识别品类名": item.get("识别品类名"),
                                 "价格字段来源": final_src,
                             }
                         )
@@ -3446,15 +3487,13 @@ class TLService:
                     )
 
                     qd_val = new_qd if new_qd is not None else row[1]
-                    cname_val = str(item["品类名"]).strip()
-                    if not cname_val:
-                        raise ValueError("品类名不能为空")
-                    cur.execute(
-                        "SELECT row_id FROM dict_categories WHERE name = %s AND is_active = 1",
-                        (cname_val,),
+                    cname_val, category_id = self._resolve_quote_category_main_name(
+                        cur,
+                        item["品类名"],
+                        allow_create=False,
                     )
-                    if not cur.fetchone():
-                        raise ValueError(f"品类不存在或未启用: {cname_val}")
+                    item["品类名"] = cname_val
+                    item["品类id"] = category_id
 
                     try:
                         cur.execute(
