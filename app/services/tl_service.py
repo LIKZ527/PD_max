@@ -4191,6 +4191,7 @@ class TLService:
         base_from = (
             "FROM quote_details qd "
             "JOIN dict_factories df ON qd.factory_id = df.id "
+            "LEFT JOIN quote_table_metadata qtm ON qd.metadata_id = qtm.id "
             "WHERE df.is_active = 1 "
             "AND EXISTS ("
             "SELECT 1 FROM dict_categories dc "
@@ -4218,6 +4219,21 @@ class TLService:
                                qd.price_normal_invoice AS `普通发票价格`,
                                qd.price_reverse_invoice AS `反向发票价格`,
                                qd.price_field_sources AS `价格字段来源`,
+                               qtm.execution_date AS `执行日期`,
+                               qtm.doc_title AS `文档标题`,
+                               qtm.subtitle AS `副标题`,
+                               qtm.valid_period AS `有效期`,
+                               qtm.price_unit AS `价格单位`,
+                               qtm.headers AS `表头列表`,
+                               qtm.footer_notes AS `页脚备注`,
+                               qtm.footer_notes_raw AS `页脚备注原文`,
+                               qtm.brand_specifications AS `品牌规格说明`,
+                               qtm.policies AS `政策信息`,
+                               qtm.raw_full_text AS `原始识别文本`,
+                               qtm.source_image AS `来源图片`,
+                               qtm.source_image AS source_image,
+                               qtm.created_at AS `元数据创建时间`,
+                               qtm.updated_at AS `元数据更新时间`,
                                qd.created_at AS `创建时间`,
                                qd.updated_at AS `更新时间`
                         {base_from}
@@ -4231,10 +4247,28 @@ class TLService:
                     for r in cur.fetchall():
                         row: Dict[str, Any] = {}
                         for c, v in zip(cols, r):
-                            if c == "价格字段来源":
+                            if c in {"价格字段来源", "表头列表", "页脚备注", "政策信息"}:
                                 row[c] = _json_cell_to_dict(v)
                             else:
                                 row[c] = _cell_json(v)
+                        metadata = {
+                            "execution_date": row.get("执行日期"),
+                            "doc_title": row.get("文档标题"),
+                            "subtitle": row.get("副标题"),
+                            "valid_period": row.get("有效期"),
+                            "price_unit": row.get("价格单位"),
+                            "headers": row.get("表头列表"),
+                            "footer_notes": row.get("页脚备注"),
+                            "footer_notes_raw": row.get("页脚备注原文"),
+                            "brand_specifications": row.get("品牌规格说明"),
+                            "policies": row.get("政策信息"),
+                            "raw_full_text": row.get("原始识别文本"),
+                            "source_image": row.get("source_image"),
+                            "created_at": row.get("元数据创建时间"),
+                            "updated_at": row.get("元数据更新时间"),
+                        }
+                        row["报价元数据"] = metadata
+                        row["full_data"] = metadata
                         rows.append(row)
             if response_format == "table":
                 rows = [
@@ -4246,6 +4280,8 @@ class TLService:
                         "基准价": item["普通价"],
                         "3%含税价": item["价格_3pct增值税"],
                         "13%含税价": item["价格_13pct增值税"],
+                        "图片": item.get("来源图片"),
+                        "source_image": item.get("source_image"),
                     }
                     for item in rows
                 ]

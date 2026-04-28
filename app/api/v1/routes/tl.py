@@ -16,6 +16,7 @@ TL比价模块路由
   1e.POST /tl/add_smelter              - 新建冶炼厂
   2. GET  /tl/get_smelters             - 获取冶炼厂列表（size 最大 200）
   2c2.DELETE /tl/purge_smelter         - 永久删除冶炼厂（硬删除；默认级联删运费/报价等；?cascade=false 为严格仅删厂）
+  2d.GET  /tl/calculate_distance       - 计算两组经纬度的球面直线距离（km）
   3. GET  /tl/get_categories           - 获取品类列表
   3b.POST /tl/upload_variety           - 上传品种（批量写入 dict_categories）
   4. POST /tl/get_comparison           - 获取比价表
@@ -41,6 +42,7 @@ TL比价模块路由
 """
 import asyncio
 import io
+import math
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -116,6 +118,34 @@ def _merge_quote_list_filters(
     elif category_name is not None and str(category_name).strip():
         cat = str(category_name).strip()
     return d_from, d_to, cat
+
+
+def _validate_coordinate(longitude: float, latitude: float, label: str) -> None:
+    if not -180 <= longitude <= 180:
+        raise ValueError(f"{label}经度必须在 -180 到 180 之间")
+    if not -90 <= latitude <= 90:
+        raise ValueError(f"{label}纬度必须在 -90 到 90 之间")
+
+
+def _haversine_distance_km(
+    lng1: float,
+    lat1: float,
+    lng2: float,
+    lat2: float,
+) -> float:
+    """计算两个 WGS84 经纬度点的球面直线距离，单位 km。"""
+    radius_km = 6371.0088
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lng2 - lng1)
+
+    a = (
+        math.sin(d_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return radius_km * c
 
 
 def _quote_details_excel_response(data: bytes) -> StreamingResponse:
@@ -710,6 +740,31 @@ def get_missing_geo_info(
         return {"code": 200, "data": service.get_missing_geo_info()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===================== 接口2d：计算两点直线距离 =====================
+
+@router.get("/calculate_distance", summary="计算两组经纬度的直线距离")
+def calculate_distance(
+    lng1: float = Query(..., ge=-180, le=180, description="起点经度"),
+    lat1: float = Query(..., ge=-90, le=90, description="起点纬度"),
+    lng2: float = Query(..., ge=-180, le=180, description="终点经度"),
+    lat2: float = Query(..., ge=-90, le=90, description="终点纬度"),
+):
+    """使用 Haversine 公式计算 WGS84 经纬度两点球面直线距离；不是驾车路线距离。"""
+    try:
+        _validate_coordinate(lng1, lat1, "起点")
+        _validate_coordinate(lng2, lat2, "终点")
+        distance_km = _haversine_distance_km(lng1, lat1, lng2, lat2)
+        return {
+            "code": 200,
+            "data": {
+                "distance_km": round(distance_km, 3),
+                "distance_m": round(distance_km * 1000, 2),
+            },
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ===================== 接口2b：修改冶炼厂 =====================
