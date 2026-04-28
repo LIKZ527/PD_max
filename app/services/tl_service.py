@@ -3007,8 +3007,10 @@ class TLService:
                                     f"冶炼厂 id={fid} 已停用，无法写入报价；请启用后重试。"
                                 )
 
-                        # 2. 品类：与 upload_variety 一致——按 name 全局唯一；停用行需恢复而非再 INSERT
-                        cat_name = item["品类名"]
+                        # 2. 品类：报价只能写入启用中的品类；停用品类不在确认时自动恢复
+                        cat_name = str(item["品类名"]).strip()
+                        if not cat_name:
+                            raise ValueError("品类名不能为空")
                         cur.execute(
                             "SELECT row_id, is_active FROM dict_categories WHERE name = %s",
                             (cat_name,),
@@ -3017,9 +3019,8 @@ class TLService:
                         if row:
                             _rid, is_active = row
                             if is_active != 1:
-                                cur.execute(
-                                    "UPDATE dict_categories SET is_active = 1 WHERE row_id = %s",
-                                    (_rid,),
+                                raise ValueError(
+                                    f"品类「{cat_name}」已停用，请先在品类管理中启用后再写入报价。"
                                 )
                         else:
                             cur.execute("SELECT COALESCE(MAX(category_id), 0) + 1 FROM dict_categories")
@@ -3030,6 +3031,7 @@ class TLService:
                                 "VALUES (%s, %s, 1, 1)",
                                 (new_cat_id, cat_name),
                             )
+                        item["品类名"] = cat_name
 
                     # 3. 存储全量元数据（如果有 full_data）
                     metadata_id = None
@@ -3328,6 +3330,14 @@ class TLService:
 
                     qd_val = new_qd if new_qd is not None else row[1]
                     cname_val = str(item["品类名"]).strip()
+                    if not cname_val:
+                        raise ValueError("品类名不能为空")
+                    cur.execute(
+                        "SELECT row_id FROM dict_categories WHERE name = %s AND is_active = 1",
+                        (cname_val,),
+                    )
+                    if not cur.fetchone():
+                        raise ValueError(f"品类不存在或未启用: {cname_val}")
 
                     try:
                         cur.execute(
@@ -4119,6 +4129,8 @@ class TLService:
                 placeholders = ", ".join(["%s"] * len(category_names))
                 conditions.append(f"qd.category_name IN ({placeholders})")
                 params.extend(category_names)
+            else:
+                conditions.append("1=0")
         if qd_exact is not None:
             conditions.append("qd.quote_date = %s")
             params.append(qd_exact)
@@ -4179,7 +4191,11 @@ class TLService:
         base_from = (
             "FROM quote_details qd "
             "JOIN dict_factories df ON qd.factory_id = df.id "
-            f"WHERE df.is_active = 1 AND {where_sql}"
+            "WHERE df.is_active = 1 "
+            "AND EXISTS ("
+            "SELECT 1 FROM dict_categories dc "
+            "WHERE dc.name = TRIM(qd.category_name) AND dc.is_active = 1"
+            f") AND {where_sql}"
         )
         try:
             with get_conn() as conn:
@@ -4267,7 +4283,11 @@ class TLService:
         base_from = (
             "FROM quote_details qd "
             "JOIN dict_factories df ON qd.factory_id = df.id "
-            f"WHERE df.is_active = 1 AND {where_sql}"
+            "WHERE df.is_active = 1 "
+            "AND EXISTS ("
+            "SELECT 1 FROM dict_categories dc "
+            "WHERE dc.name = TRIM(qd.category_name) AND dc.is_active = 1"
+            f") AND {where_sql}"
         )
         try:
             from openpyxl import Workbook
