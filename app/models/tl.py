@@ -345,6 +345,10 @@ class UpdateSmelterRequest(BaseModel):
     冶炼厂id: int = Field(..., description="冶炼厂ID")
     冶炼厂名: Optional[str] = Field(None, description="冶炼厂名称（可选）")
     is_active: Optional[bool] = Field(None, description="是否启用（可选）")
+    循融宝发货: Optional[bool] = Field(
+        None,
+        description="是否循融宝发货；启用后比价/采购建议中该厂货物单价按系统规则加价（元/吨）",
+    )
     地址: Optional[str] = Field(None, description="冶炼厂地址（可选）；传 null 可清空")
     省: Optional[str] = None
     市: Optional[str] = None
@@ -360,6 +364,23 @@ class UpdateSmelterRequest(BaseModel):
         ge=-90,
         le=90,
         description="与经度成对传则直接改库中坐标",
+    )
+
+
+class SmelterXunrongbaoItem(BaseModel):
+    """批量设置循融宝发货：单条冶炼厂"""
+
+    冶炼厂id: int = Field(..., description="冶炼厂 dict_factories.id")
+    循融宝发货: bool = Field(..., description="是否循融宝发货")
+
+
+class BatchSetSmeltersXunrongbaoRequest(BaseModel):
+    """同时修改多个冶炼厂的循融宝发货开关"""
+
+    列表: List[SmelterXunrongbaoItem] = Field(
+        ...,
+        min_length=1,
+        description="至少一条；可混合同一批次内对不同冶炼厂开/关",
     )
 
 

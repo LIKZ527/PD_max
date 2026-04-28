@@ -16,7 +16,7 @@ from typing import AbstractSet, Any, Dict, List, Optional, Set, Tuple
 
 from pymysql.err import IntegrityError as PyMySQLIntegrityError
 
-from app.config import UPLOAD_DIR
+from app.config import UPLOAD_DIR, XUNRONGBAO_SHIPPING_PREMIUM_PER_TON
 from app.database import get_conn
 from app.finance_log import log_finance_event
 from app.models.tl import OPTIMAL_PRICE_BASIS_ALLOWED, UpdateQuoteDetailRequest
@@ -28,6 +28,7 @@ from app.quote_price_sources import (
     SOURCE_ORIGINAL,
 )
 from app.price_tax_utils import (
+    apply_per_ton_premium_to_quote_row,
     derive_net_and_vat_from_quote_row,
     derive_vat_prices_from_stated_price,
     fill_vat_from_exclusive_net,
@@ -45,6 +46,7 @@ from app.services.tl_dict_geo_crud import (
     CODE_OK as SA_CODE_OK,
     CODE_VALIDATION as SA_CODE_VALIDATION,
     smelter_create as sa_smelter_create,
+    smelter_get as sa_smelter_get,
     smelter_list as sa_smelter_list,
     smelter_update as sa_smelter_update,
     warehouse_create as sa_wh_create,
@@ -1290,6 +1292,7 @@ class TLService:
             "区": item.get("district") or "",
             "经度": item.get("longitude"),
             "纬度": item.get("latitude"),
+            "循融宝发货": bool(item.get("循融宝发货")),
         }
 
     def get_smelters(
@@ -1341,7 +1344,8 @@ class TLService:
                     cur.execute(
                         f"SELECT id AS `冶炼厂id`, name AS `冶炼厂`, address AS `地址`, "
                         f"province AS `省`, city AS `市`, district AS `区`, "
-                        f"longitude AS `经度`, latitude AS `纬度` "
+                        f"longitude AS `经度`, latitude AS `纬度`, "
+                        f"COALESCE(use_xunrongbao, 0) AS `循融宝发货` "
                         f"FROM dict_factories WHERE {where_sql} "
                         "ORDER BY id",
                         tuple(params),
@@ -1356,6 +1360,57 @@ class TLService:
         except Exception as e:
             logger.error(f"获取冶炼厂列表失败: {e}")
             raise
+
+    def get_smelter(self, smelter_id: int) -> Dict[str, Any]:
+        """单个冶炼厂详情（含循融宝发货、地址与坐标）；启用状态见 is_active。"""
+        res = _raise_tl_geo_crud_result(sa_smelter_get(smelter_id))
+        data = res.get("data") or {}
+        row = self._site_smelter_item_to_tl_row(data)
+        row["is_active"] = bool(int(data.get("status", 1)))
+        return row
+
+    def list_smelter_xunrongbao(
+        self,
+        include_inactive: bool = False,
+    ) -> Dict[str, Any]:
+        """查询全部冶炼厂的循融宝发货状态及当前系统加价（元/吨）。"""
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    if include_inactive:
+                        cur.execute(
+                            "SELECT id, name, COALESCE(use_xunrongbao, 0), is_active "
+                            "FROM dict_factories ORDER BY id"
+                        )
+                    else:
+                        cur.execute(
+                            "SELECT id, name, COALESCE(use_xunrongbao, 0), is_active "
+                            "FROM dict_factories WHERE is_active = 1 ORDER BY id"
+                        )
+                    rows = cur.fetchall()
+            return {
+                "加价元每吨": XUNRONGBAO_SHIPPING_PREMIUM_PER_TON,
+                "list": [
+                    {
+                        "冶炼厂id": int(r[0]),
+                        "冶炼厂": r[1],
+                        "循融宝发货": bool(int(r[2])),
+                        "is_active": bool(int(r[3])),
+                    }
+                    for r in rows
+                ],
+            }
+        except Exception as e:
+            logger.error(f"列出冶炼厂循融宝状态失败: {e}")
+            raise
+
+    def set_smelter_xunrongbao(self, smelter_id: int, enabled: bool) -> Dict[str, Any]:
+        """仅修改循融宝发货开关（等价于 update_smelter 仅传 循融宝发货）。"""
+        return self.update_smelter(smelter_id, {"循融宝发货": enabled})
+
+    def clear_smelter_xunrongbao(self, smelter_id: int) -> Dict[str, Any]:
+        """关闭循融宝发货（不删除冶炼厂，不软删）。"""
+        return self.update_smelter(smelter_id, {"循融宝发货": False})
 
     def get_missing_geo_info(self) -> Dict[str, Any]:
         """返回启用中且缺少经度或纬度的仓库、冶炼厂，供前端集中补全地址坐标。"""
@@ -1422,6 +1477,8 @@ class TLService:
     def _build_site_smelter_update_patch(self, patch: Dict[str, Any]) -> Dict[str, Any]:
         """冶炼厂省市区变更且未手传经纬度时，由 tl_dict_geo_crud 内 maybe_geocode 重算坐标。"""
         out: Dict[str, Any] = {}
+        if "循融宝发货" in patch and patch["循融宝发货"] is not None:
+            out["use_xunrongbao"] = bool(patch["循融宝发货"])
         if "冶炼厂名" in patch:
             raw = patch["冶炼厂名"]
             if raw is None or str(raw).strip() == "":
@@ -1448,11 +1505,11 @@ class TLService:
         return out
 
     def update_smelter(self, smelter_id: int, patch: Dict[str, Any]) -> Dict[str, Any]:
-        allowed = {"冶炼厂名", "is_active", "地址"} | self._SM_SITE_PATCH_KEYS
+        allowed = {"冶炼厂名", "is_active", "地址", "循融宝发货"} | self._SM_SITE_PATCH_KEYS
         keys = set(patch.keys()) & allowed
         if not keys:
             raise ValueError(
-                "至少需要提供一个待修改字段：冶炼厂名、is_active、地址、省、市、区、经度、纬度 之一"
+                "至少需要提供一个待修改字段：冶炼厂名、is_active、地址、循融宝发货、省、市、区、经度、纬度 之一"
             )
 
         use_site = bool(keys & self._SM_SITE_PATCH_KEYS)
@@ -1502,6 +1559,10 @@ class TLService:
                         updates.append("address = %s")
                         params.append(_strip_optional_str(addr) if addr is not None else None)
 
+                    if "循融宝发货" in patch and patch["循融宝发货"] is not None:
+                        updates.append("use_xunrongbao = %s")
+                        params.append(1 if patch["循融宝发货"] else 0)
+
                     if not updates:
                         raise ValueError("没有有效的修改项")
 
@@ -1516,6 +1577,38 @@ class TLService:
             raise
         except Exception as e:
             logger.error(f"修改冶炼厂失败: {e}")
+            raise
+
+    def batch_set_smelters_xunrongbao(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """批量设置冶炼厂是否循融宝发货；每项含 冶炼厂id、循融宝发货。"""
+        if not items:
+            raise ValueError("列表不能为空")
+        try:
+            with get_conn() as conn:
+                conn.autocommit(False)
+                try:
+                    with conn.cursor() as cur:
+                        for it in items:
+                            fid = int(it["冶炼厂id"])
+                            flag = bool(it["循融宝发货"])
+                            cur.execute(
+                                "UPDATE dict_factories SET use_xunrongbao = %s WHERE id = %s",
+                                (1 if flag else 0, fid),
+                            )
+                            if cur.rowcount != 1:
+                                raise ValueError(f"冶炼厂 id={fid} 不存在")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            return {
+                "code": 200,
+                "msg": f"已更新 {len(items)} 个冶炼厂的循融宝发货配置",
+            }
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"批量设置循融宝发货失败: {e}")
             raise
 
     # ==================== 接口2c：删除冶炼厂（软删除） ====================
@@ -2076,6 +2169,23 @@ class TLService:
                             if cat_name in names:
                                 name_to_cat_id[cat_name] = cat_id
                                 break
+
+                    cur.execute(
+                        f"SELECT id, COALESCE(use_xunrongbao, 0) FROM dict_factories "
+                        f"WHERE id IN ({sm_ph})",
+                        tuple(smelter_ids),
+                    )
+                    xrb_fids = {int(r[0]) for r in cur.fetchall() if int(r[1]) == 1}
+                    for map_key in list(raw_price_map.keys()):
+                        fid_k, _cname = map_key
+                        if fid_k not in xrb_fids:
+                            continue
+                        merged = merge_factory_rates(tax_rate_map.get(fid_k, {}))
+                        raw_price_map[map_key] = apply_per_ton_premium_to_quote_row(
+                            raw_price_map[map_key],
+                            merged,
+                            XUNRONGBAO_SHIPPING_PREMIUM_PER_TON,
+                        )
 
             # 换算逻辑（纯 Python，连接已关闭）
             # col → tax_type 的对应关系，用于反算不含税价
@@ -4893,6 +5003,23 @@ class TLService:
                         col: (float(v) if v is not None else None)
                         for col, v in zip(col_names, row[2:])
                     }
+
+                cur.execute(
+                    f"SELECT id, COALESCE(use_xunrongbao, 0) FROM dict_factories "
+                    f"WHERE id IN ({sm_ph})",
+                    tuple(smelter_ids),
+                )
+                xrb_fids_ps = {int(r[0]) for r in cur.fetchall() if int(r[1]) == 1}
+                for map_key in list(raw_price_map.keys()):
+                    fid_k, _cn = map_key
+                    if fid_k not in xrb_fids_ps:
+                        continue
+                    merged = merge_factory_rates(tax_rate_map.get(fid_k, {}))
+                    raw_price_map[map_key] = apply_per_ton_premium_to_quote_row(
+                        raw_price_map[map_key],
+                        merged,
+                        XUNRONGBAO_SHIPPING_PREMIUM_PER_TON,
+                    )
 
         # 价格反算逻辑
         COL_TO_TAX: Dict[str, str] = {

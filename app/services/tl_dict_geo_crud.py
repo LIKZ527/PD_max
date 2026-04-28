@@ -128,6 +128,7 @@ def _factory_row_api(row: Dict[str, Any]) -> Dict[str, Any]:
         "address": row.get("address") or "",
         "longitude": float(row["longitude"]) if row.get("longitude") is not None else None,
         "latitude": float(row["latitude"]) if row.get("latitude") is not None else None,
+        "循融宝发货": bool(int(row.get("use_xunrongbao") or 0)),
         "status": 1 if int(row.get("is_active", 1)) == 1 else 0,
         "createTime": _fmt_ts(row.get("created_at")),
         "updateTime": _fmt_ts(row.get("updated_at")),
@@ -1246,6 +1247,11 @@ def smelter_update(factory_id: int, patch: Dict[str, Any]) -> Dict[str, Any]:
                         return _err(CODE_VALIDATION, "status 须为 0 或 1")
                     updates.append("is_active = %s")
                     params.append(1 if int(status) == 1 else 0)
+
+                if "use_xunrongbao" in patch and patch["use_xunrongbao"] is not None:
+                    uxb = patch["use_xunrongbao"]
+                    updates.append("use_xunrongbao = %s")
+                    params.append(1 if uxb else 0)
 
                 has_lon = "longitude" in patch
                 has_lat = "latitude" in patch

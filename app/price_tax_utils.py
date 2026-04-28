@@ -156,3 +156,36 @@ def derive_net_and_vat_from_quote_row(
             return round(net, 2), p1, p3, p13
 
     return None
+
+
+def apply_per_ton_premium_to_quote_row(
+    prices: Dict[str, Any],
+    merged_rates: Dict[str, float],
+    premium: float,
+) -> Dict[str, Optional[float]]:
+    """
+    在已解析的「不含税基准」上加价 premium 元/吨，并按冶炼厂合并税率重算各档含税价。
+    用于循融宝发货等「整单货物单价 +N 元/吨」场景，与 derive_net_and_vat_from_quote_row 口径一致。
+    """
+    if not premium:
+        return {k: prices.get(k) for k in prices}
+
+    derived = derive_net_and_vat_from_quote_row(prices, merged_rates)
+    if derived is None:
+        return {k: prices.get(k) for k in prices}
+
+    net, _p1, _p3, _p13 = derived
+    new_net = round(float(net) + float(premium), 2)
+    p1, p3, p13 = fill_vat_from_exclusive_net(new_net, merged_rates)
+    out: Dict[str, Optional[float]] = {
+        k: (float(v) if v is not None else None) for k, v in prices.items()
+    }
+    out["unit_price"] = new_net
+    out["price_1pct_vat"] = p1
+    out["price_3pct_vat"] = p3
+    out["price_13pct_vat"] = p13
+    if prices.get("price_normal_invoice") is not None:
+        out["price_normal_invoice"] = new_net
+    if prices.get("price_reverse_invoice") is not None:
+        out["price_reverse_invoice"] = new_net
+    return out

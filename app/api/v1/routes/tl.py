@@ -14,7 +14,12 @@ TL比价模块路由
       GET /tl/get_warehouse_links_list、GET /tl/get_warehouse_links_outbound、GET /tl/get_warehouse_links_inbound、
       PUT /tl/replace_warehouse_links_outbound
   1e.POST /tl/add_smelter              - 新建冶炼厂
-  2. GET  /tl/get_smelters             - 获取冶炼厂列表（size 最大 200）
+  2. GET  /tl/get_smelters             - 获取冶炼厂列表（size 最大 200；含循融宝发货）
+  2a. GET  /tl/get_smelter              - 获取单个冶炼厂详情（含循融宝、is_active）
+  2a1.GET  /tl/list_smelter_xunrongbao  - 查询全部冶炼厂循融宝状态及加价元/吨
+  2b1.POST /tl/set_smelter_xunrongbao   - 设置单个冶炼厂是否循融宝发货（改）
+  2b2.DELETE /tl/smelter_xunrongbao/{id} - 关闭循融宝发货（删开关，不删厂）
+  2b3.POST /tl/batch_set_smelters_xunrongbao - 批量设置循融宝发货
   2c2.DELETE /tl/purge_smelter         - 永久删除冶炼厂（硬删除；默认级联删运费/报价等；?cascade=false 为严格仅删厂）
   2d.GET  /tl/calculate_distance       - 计算两组经纬度的球面直线距离（km）
   3. GET  /tl/get_categories           - 获取品类列表
@@ -73,6 +78,8 @@ from app.models.tl import (
     AddSmelterRequest,
     UploadVarietyRequest,
     UpdateSmelterRequest,
+    SmelterXunrongbaoItem,
+    BatchSetSmeltersXunrongbaoRequest,
     PurchaseSuggestionRequest,
     VlmFullData,
     TaxRateItem,
@@ -695,6 +702,35 @@ def add_smelter(
 
 # ===================== 接口2：获取冶炼厂列表 =====================
 
+@router.get("/get_smelter", summary="获取单个冶炼厂详情")
+def get_smelter(
+    冶炼厂id: int = Query(..., description="冶炼厂 id"),
+    service: TLService = Depends(get_tl_service),
+):
+    """含地址、经纬度、循融宝发货、is_active 等；用于循融宝与其它字段联查。"""
+    try:
+        return {"code": 200, "data": service.get_smelter(冶炼厂id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/list_smelter_xunrongbao", summary="列出冶炼厂循融宝发货状态")
+def list_smelter_xunrongbao(
+    include_inactive: bool = Query(
+        False,
+        description="为 true 时包含已停用冶炼厂；默认仅启用",
+    ),
+    service: TLService = Depends(get_tl_service),
+):
+    """返回系统加价元/吨与各冶炼厂当前开关，便于配置页一次性加载。"""
+    try:
+        return {"code": 200, "data": service.list_smelter_xunrongbao(include_inactive)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/get_smelters", summary="获取冶炼厂列表")
 def get_smelters(
     keyword: Optional[str] = Query(
@@ -779,6 +815,52 @@ def update_smelter(
         patch = body.model_dump(exclude_unset=True)
         smelter_id = patch.pop("冶炼厂id")
         return service.update_smelter(smelter_id=smelter_id, patch=patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/set_smelter_xunrongbao", summary="设置单个冶炼厂循融宝发货")
+def set_smelter_xunrongbao(
+    body: SmelterXunrongbaoItem,
+    service: TLService = Depends(get_tl_service),
+):
+    """增/改循融宝开关：传 true 为启用循融宝发货，false 为关闭。"""
+    try:
+        return service.set_smelter_xunrongbao(
+            smelter_id=body.冶炼厂id,
+            enabled=body.循融宝发货,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/smelter_xunrongbao/{smelter_id}", summary="关闭冶炼厂循融宝发货")
+def clear_smelter_xunrongbao(
+    smelter_id: int,
+    service: TLService = Depends(get_tl_service),
+):
+    """仅将循融宝发货置为否，不删除冶炼厂、不做软删。"""
+    try:
+        return service.clear_smelter_xunrongbao(smelter_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/batch_set_smelters_xunrongbao", summary="批量设置冶炼厂循融宝发货")
+def batch_set_smelters_xunrongbao(
+    body: BatchSetSmeltersXunrongbaoRequest,
+    service: TLService = Depends(get_tl_service),
+):
+    """同一请求可提交多条，分别指定各冶炼厂是否循融宝发货（新建冶炼厂默认为否）。"""
+    try:
+        items = [x.model_dump() for x in body.列表]
+        return service.batch_set_smelters_xunrongbao(items)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
