@@ -96,6 +96,15 @@ def _normalize_optimal_basis_token(x: Any) -> str:
     )
 
 
+class CategoryTonnageItem(BaseModel):
+    """多品类混选时按品类分别指定需求吨数。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    品类id: int = Field(..., description="与 品类id列表 中的 category_id 对应")
+    吨数: float = Field(..., gt=0, description="该品类需求吨数")
+
+
 class ComparisonRequest(BaseModel):
     """接口4 请求体"""
 
@@ -114,7 +123,17 @@ class ComparisonRequest(BaseModel):
     吨数: float = Field(
         1.0,
         gt=0,
-        description="货物吨数；比价明细中 总价=单价×吨数，运费=运费单价×吨数，利润=总价−运费（与 报价金额、总运费 一致）",
+        description=(
+            "默认/共用吨数：未传 品类吨数列表 时，所有选中品类均使用此吨数；"
+            "与 品类吨数列表 二选一（传列表后忽略本字段对各品类的取值）"
+        ),
+    )
+    品类吨数列表: Optional[List[CategoryTonnageItem]] = Field(
+        None,
+        description=(
+            "按品类分别指定吨数；若传入则须覆盖 品类id列表 中每一个 id 恰好一次，"
+            "用于多品类不同重量混选时的比价（总价/运费/利润按对应品类吨数计算）"
+        ),
     )
     最优价计税口径列表: List[str] = Field(
         default_factory=lambda: ["3pct"],
@@ -187,6 +206,26 @@ class ComparisonRequest(BaseModel):
             raise ValueError(
                 f"最优价排序口径 {sk!r} 须为最优价计税口径列表中的一项，当前列表={self.最优价计税口径列表}"
             )
+        if self.品类吨数列表:
+            seen: set = set()
+            for it in self.品类吨数列表:
+                cid = it.品类id
+                if cid in seen:
+                    raise ValueError(f"品类吨数列表 中 品类id 重复: {cid}")
+                seen.add(cid)
+            req = set(self.品类id列表)
+            if seen != req:
+                missing = sorted(req - seen)
+                extra = sorted(seen - req)
+                parts = []
+                if missing:
+                    parts.append(f"缺少吨数的品类id: {missing}")
+                if extra:
+                    parts.append(f"未在 品类id列表 中的品类id: {extra}")
+                raise ValueError(
+                    "品类吨数列表 须与 品类id列表 一一对应（每个选中品类恰好一条）。"
+                    + (" ".join(parts) if parts else "")
+                )
         return self
 
 
