@@ -1982,6 +1982,11 @@ class TLService:
         - 否则：以比价基准日（默认 `Asia/Shanghai` 当天，见 `QUOTE_COMPARISON_TZ`）为参照，
           对每个 (冶炼厂, 品种名) 在 `quote_details` 中取 **与基准日日历距离最近** 的一条；
           距离相同时按 **`created_at` 最新**（视为最近上传/写入）优先，再以 `id` 较大者优先。
+
+        **冶炼厂与明细范围**：
+        - `冶炼厂id列表` 仅过滤停用厂后 **保持请求中的顺序与去重结果**；
+        - 对每个「选中仓库 × 上述冶炼厂 × 选中品类」均返回明细行；若该组合在 `freight_rates` 中尚无记录，
+          **运费单价按 0** 补行，避免「库里勾选了厂但响应里完全没有该厂」的错位感。
         """
         if not warehouse_ids or not smelter_ids or not category_ids:
             return {
@@ -2027,11 +2032,19 @@ class TLService:
                     sm_ph = ",".join(["%s"] * len(smelter_ids))
                     cat_ph = ",".join(["%s"] * len(category_ids))
 
+                    req_smelter_ids = [int(x) for x in smelter_ids]
                     cur.execute(
                         f"SELECT id FROM dict_factories WHERE id IN ({sm_ph}) AND is_active = 1",
-                        tuple(smelter_ids),
+                        tuple(req_smelter_ids),
                     )
-                    smelter_ids = [int(row[0]) for row in cur.fetchall()]
+                    active_sm = {int(row[0]) for row in cur.fetchall()}
+                    # 与请求顺序一致（仅去掉停用/无效 id、去重），避免 fetchall 顺序与前端所选冶炼厂错位
+                    smelter_ids = []
+                    _seen_sm: Set[int] = set()
+                    for sid in req_smelter_ids:
+                        if sid in active_sm and sid not in _seen_sm:
+                            _seen_sm.add(sid)
+                            smelter_ids.append(sid)
                     if not smelter_ids:
                         return {
                             "明细": [],
@@ -2071,7 +2084,31 @@ class TLService:
                     )
                     freight_map: Dict[tuple, tuple] = {}
                     for wid, wname, fid, fname, freight in cur.fetchall():
-                        freight_map[(wid, fid)] = (wname, fname, freight)
+                        freight_map[(int(wid), int(fid))] = (wname, fname, freight)
+
+                    # 请求中的每个「仓库×启用冶炼厂」都应有明细行；无运费记录时按 0 元/吨补全，避免与所选冶炼厂列表对不齐
+                    cur.execute(
+                        f"SELECT id, name FROM dict_warehouses WHERE id IN ({wh_ph})",
+                        tuple(warehouse_ids),
+                    )
+                    wid_to_name: Dict[int, str] = {
+                        int(r[0]): str(r[1]) for r in cur.fetchall()
+                    }
+                    cur.execute(
+                        f"SELECT id, name FROM dict_factories WHERE id IN ({sm_ph})",
+                        tuple(smelter_ids),
+                    )
+                    fid_to_name: Dict[int, str] = {
+                        int(r[0]): str(r[1]) for r in cur.fetchall()
+                    }
+                    for wid in warehouse_ids:
+                        w_int = int(wid)
+                        for fid in smelter_ids:
+                            key = (w_int, int(fid))
+                            if key not in freight_map:
+                                wn = wid_to_name.get(w_int, f"仓库{w_int}")
+                                fn = fid_to_name.get(int(fid), f"冶炼厂{int(fid)}")
+                                freight_map[key] = (wn, fn, 0.0)
 
                     # category_id → 品类名称列表（用于匹配价格表）
                     cur.execute(
@@ -2207,12 +2244,15 @@ class TLService:
                 "price_13pct_vat": "13pct",
             }
 
-            def resolve_price(fid: int, cat_id: int) -> Tuple[Optional[float], str]:
+            def resolve_price(
+                fid: int, cat_id: int
+            ) -> Tuple[Optional[float], str, Optional[Dict[str, Optional[float]]]]:
                 """
-                返回 (price, source)
-                source: "direct" | "calc_from_base" | "calc_from_other_vat" | "unavailable"
+                返回 (price, source, prices_row)。
+                prices_row 为本次取价所依据的 quote 列字典，须与 derive_net_and_vat_from_quote_row
+                使用同一份数据；否则在品类多别名时，若首个别名在库中为空壳行（键全为 None），
+                会出现主行「利润」正常但「利润_含3%」「最优价各口径利润」及冶炼厂汇总合计为 0 的错误。
                 """
-                # 找该 category_id 下的所有品类名称，取第一个有报价的
                 cat_names = cat_id_to_names.get(cat_id, [])
                 for cat_name in cat_names:
                     prices = raw_price_map.get((fid, cat_name), {})
@@ -2227,13 +2267,13 @@ class TLService:
                     # 1. 直接有目标列
                     direct = prices.get(target_col)
                     if direct is not None:
-                        return direct, "direct"
+                        return direct, "direct", prices
 
                     # 2. 不含税 unit_price → 目标税率含税价
                     if target_tax and prices.get("unit_price") is not None and target_tax in merged:
                         up = float(prices["unit_price"])
                         calc = inclusive_from_net(up, merged[target_tax])
-                        return calc, "calc_from_base"
+                        return calc, "calc_from_base", prices
 
                     # 3. 目标为不含税基准，由已知含税价反算
                     if target_col == "unit_price":
@@ -2241,12 +2281,12 @@ class TLService:
                             known_price = prices.get(col)
                             if known_price is not None and src_tax in merged:
                                 net = net_from_inclusive(float(known_price), merged[src_tax])
-                                return round(net, 2), f"calc_from_{src_tax}"
+                                return round(net, 2), f"calc_from_{src_tax}", prices
                         # 与 derive_net_and_vat_from_quote_row 一致：仅有普票/反向发票列时按不含税理解
                         for col in ("price_normal_invoice", "price_reverse_invoice"):
                             v = prices.get(col)
                             if v is not None:
-                                return float(v), f"direct_{col}"
+                                return float(v), f"direct_{col}", prices
 
                     # 4. 从某一档含税价反算不含税，再换算到目标税率
                     if target_tax and target_tax in merged:
@@ -2255,16 +2295,9 @@ class TLService:
                             if known_price is not None and src_tax in merged:
                                 net = net_from_inclusive(float(known_price), merged[src_tax])
                                 calc = inclusive_from_net(net, merged[target_tax])
-                                return calc, f"calc_from_{src_tax}"
+                                return calc, f"calc_from_{src_tax}", prices
 
-                return None, "unavailable"
-
-            def pick_quote_row(fid: int, cat_id: int) -> Optional[Dict[str, Optional[float]]]:
-                for cn in cat_id_to_names.get(cat_id, []):
-                    row = raw_price_map.get((fid, cn), {})
-                    if row:
-                        return row
-                return None
+                return None, "unavailable", None
 
             # 组合结果；总运费 = 运费单价（元/吨）× 吨数；总价 = 单价（元/吨）× 吨数
             t = float(tons)
@@ -2274,7 +2307,7 @@ class TLService:
                     cat_name = cat_map.get(cid)
                     if cat_name is None:
                         continue
-                    price, source = resolve_price(fid, cid)
+                    price, source, qrow = resolve_price(fid, cid)
                     merged = merge_factory_rates(tax_rate_map.get(fid, {}))
                     if price is not None and target_tax and target_tax in merged:
                         p_net = round(
@@ -2297,7 +2330,6 @@ class TLService:
                         else round(-freight_cost_total, 2)
                     )
 
-                    qrow = pick_quote_row(fid, cid)
                     breakdown = (
                         derive_net_and_vat_from_quote_row(qrow, merged) if qrow else None
                     )

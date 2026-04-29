@@ -23,11 +23,12 @@ app/
 ├── models/                 # Pydantic 模型
 ├── price_tax_utils.py
 └── quote_price_sources.py
-docs/api.md                 # 接口说明与 JSON 示例
+docs/api.md                 # TL 接口说明与 JSON 示例
+docs/后端接口文档.md       # 交付用：全模块路由总览（TL / 认证 / 智能预测 / 鉴伪）
 docs/docker.md              # Compose / 部署
 ```
 
-完整接口列表与参数以 **[docs/api.md](docs/api.md)** 为准（README 不再逐条维护，避免与代码脱节）。
+TL 详细示例以 **[docs/api.md](docs/api.md)** 为准；**全后端路径总表与模块开关**见 **[docs/后端接口文档.md](docs/后端接口文档.md)**；字段级契约以运行环境 **`/docs`** OpenAPI 为准。
 
 ## 快速开始
 
