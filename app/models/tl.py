@@ -132,7 +132,8 @@ class ComparisonRequest(BaseModel):
         None,
         description=(
             "YYYY-MM-DD，可选。指定则只使用该日期的 quote_details；"
-            "省略则对每个冶炼厂+品种名取「比价日历日及以前」中 quote_date 最近的一条（见接口文档 QUOTE_COMPARISON_TZ）"
+            "省略则以比价基准日（默认 Asia/Shanghai 当天，见 QUOTE_COMPARISON_TZ）为参照，"
+            "对每个冶炼厂+品种名取 quote_date 与该日「日历距离最近」的一条（距离相同则按 created_at 最新优先，即最近上传/写入）"
         ),
     )
 

@@ -70,8 +70,8 @@ _MARKER_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 def _comparison_quote_calendar_date() -> date:
     """
-    比价使用的「当天」报价日期（仅取 quote_details 中该日的行，不取历史上传）。
-    默认按 Asia/Shanghai 日历日；可通过环境变量 QUOTE_COMPARISON_TZ 设为其它 IANA 时区（如 UTC）。
+    未传「报价日期」时，在 quote_details 中取与**该日历日**距离最近的一条报价。
+    默认按 Asia/Shanghai；可通过环境变量 QUOTE_COMPARISON_TZ 设为其它 IANA 时区（如 UTC）。
     """
     tz_name = (os.getenv("QUOTE_COMPARISON_TZ") or "Asia/Shanghai").strip() or "Asia/Shanghai"
     try:
@@ -80,7 +80,7 @@ def _comparison_quote_calendar_date() -> date:
         return datetime.now(ZoneInfo(tz_name)).date()
     except Exception:
         logger.warning(
-            "QUOTE_COMPARISON_TZ=%r 无效，比价日期回退为服务器本地当天", tz_name
+            "QUOTE_COMPARISON_TZ=%r 无效，比价基准日回退为服务器本地当天", tz_name
         )
         return date.today()
 
@@ -1969,8 +1969,9 @@ class TLService:
 
         **报价日期**：
         - 若传入 `quote_date_str`（YYYY-MM-DD）：只使用该日的 `quote_details`。
-        - 否则：对每个 (冶炼厂, 品种名) 取 **quote_date ≤ 比价日历日**（默认 `Asia/Shanghai`，见 `QUOTE_COMPARISON_TZ`）
-          的 **最近一条** 报价，避免「确认报价不是今天」时比价整表无单价。
+        - 否则：以比价基准日（默认 `Asia/Shanghai` 当天，见 `QUOTE_COMPARISON_TZ`）为参照，
+          对每个 (冶炼厂, 品种名) 在 `quote_details` 中取 **与基准日日历距离最近** 的一条；
+          距离相同时按 **`created_at` 最新**（视为最近上传/写入）优先，再以 `id` 较大者优先。
         """
         if not warehouse_ids or not smelter_ids or not category_ids:
             return {
@@ -2105,7 +2106,6 @@ class TLService:
                     for fid, ttype, rate in cur.fetchall():
                         tax_rate_map.setdefault(fid, {})[ttype] = float(rate)
 
-                    quote_day = _comparison_quote_calendar_date()
                     if quote_date_str is not None and str(quote_date_str).strip():
                         try:
                             exact_qd = date.fromisoformat(str(quote_date_str).strip())
@@ -2126,6 +2126,7 @@ class TLService:
                             tuple(smelter_ids) + tuple(all_cat_names) + (exact_qd,),
                         )
                     else:
+                        ref_day = _comparison_quote_calendar_date()
                         cur.execute(
                             f"""
                             SELECT qd.factory_id, TRIM(qd.category_name) AS category_name,
@@ -2134,21 +2135,22 @@ class TLService:
                                    qd.price_normal_invoice, qd.price_reverse_invoice
                             FROM quote_details qd
                             INNER JOIN (
-                                SELECT factory_id, TRIM(category_name) AS cname, MAX(quote_date) AS mx
-                                FROM quote_details
-                                WHERE factory_id IN ({sm_ph})
-                                  AND TRIM(category_name) IN ({cn_ph})
-                                  AND quote_date <= %s
-                                GROUP BY factory_id, TRIM(category_name)
-                            ) latest ON latest.factory_id = qd.factory_id
-                                AND TRIM(qd.category_name) = latest.cname
-                                AND latest.mx = qd.quote_date
-                            WHERE qd.factory_id IN ({sm_ph})
-                              AND TRIM(qd.category_name) IN ({cn_ph})
+                                SELECT id FROM (
+                                    SELECT id,
+                                           ROW_NUMBER() OVER (
+                                               PARTITION BY factory_id, TRIM(category_name)
+                                               ORDER BY ABS(DATEDIFF(quote_date, %s)) ASC,
+                                                        created_at DESC,
+                                                        id DESC
+                                           ) AS rn
+                                    FROM quote_details
+                                    WHERE factory_id IN ({sm_ph})
+                                      AND TRIM(category_name) IN ({cn_ph})
+                                ) ranked
+                                WHERE ranked.rn = 1
+                            ) pick ON pick.id = qd.id
                             """,
-                            tuple(smelter_ids)
-                            + tuple(all_cat_names)
-                            + (quote_day,)
+                            (ref_day,)
                             + tuple(smelter_ids)
                             + tuple(all_cat_names),
                         )
@@ -4898,7 +4900,7 @@ class TLService:
         price_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        根据仓库列表和需求（品类+吨数），查询最新运费和报价。
+        根据仓库列表和需求（品类+吨数），查询最新运费和报价（报价选取与 get_comparison 未传「报价日期」一致：按比价基准日取日历距离最近，并列按 created_at 最新）。
         冶炼厂默认取 dict_factories 中全部启用冶炼厂，无需前端传入。
         整理结构化数据后调用 LLM 生成各仓库发车建议表。
         price_type: 目标税率类型，None=普通价, 1pct/3pct/13pct/normal_invoice/reverse_invoice
@@ -5006,32 +5008,50 @@ class TLService:
                 )
                 cat_id_to_names: Dict[int, List[str]] = {}
                 for cat_id, name in cur.fetchall():
-                    cat_id_to_names.setdefault(cat_id, []).append(name)
+                    n = str(name).strip()
+                    if not n:
+                        continue
+                    lst = cat_id_to_names.setdefault(cat_id, [])
+                    if n not in lst:
+                        lst.append(n)
 
                 if not cat_id_to_names:
                     return {"demand_rows": [], "raw": []}
 
-                # 所有品类名称
-                all_cat_names = [name for names in cat_id_to_names.values() for name in names]
+                all_cat_names: List[str] = []
+                _seen_cn: set = set()
+                for names in cat_id_to_names.values():
+                    for n in names:
+                        if n not in _seen_cn:
+                            _seen_cn.add(n)
+                            all_cat_names.append(n)
                 cn_ph = ",".join(["%s"] * len(all_cat_names))
 
-                # 最新报价：通过品类名称查询
+                ref_day = _comparison_quote_calendar_date()
                 cur.execute(
                     f"""
-                    SELECT factory_id, category_name,
-                           unit_price, price_1pct_vat, price_3pct_vat, price_13pct_vat,
-                           price_normal_invoice, price_reverse_invoice
-                    FROM quote_details
-                    WHERE factory_id IN ({sm_ph})
-                      AND category_name IN ({cn_ph})
-                      AND quote_date = (
-                          SELECT MAX(qd2.quote_date)
-                          FROM quote_details qd2
-                          WHERE qd2.factory_id = quote_details.factory_id
-                            AND qd2.category_name = quote_details.category_name
-                      )
+                    SELECT qd.factory_id, TRIM(qd.category_name) AS category_name,
+                           qd.unit_price, qd.price_1pct_vat, qd.price_3pct_vat,
+                           qd.price_13pct_vat,
+                           qd.price_normal_invoice, qd.price_reverse_invoice
+                    FROM quote_details qd
+                    INNER JOIN (
+                        SELECT id FROM (
+                            SELECT id,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY factory_id, TRIM(category_name)
+                                       ORDER BY ABS(DATEDIFF(quote_date, %s)) ASC,
+                                                created_at DESC,
+                                                id DESC
+                                   ) AS rn
+                            FROM quote_details
+                            WHERE factory_id IN ({sm_ph})
+                              AND TRIM(category_name) IN ({cn_ph})
+                        ) ranked
+                        WHERE ranked.rn = 1
+                    ) pick ON pick.id = qd.id
                     """,
-                    tuple(smelter_ids) + tuple(all_cat_names),
+                    (ref_day,) + tuple(smelter_ids) + tuple(all_cat_names),
                 )
                 col_names = ["unit_price", "price_1pct_vat", "price_3pct_vat",
                              "price_13pct_vat", "price_normal_invoice", "price_reverse_invoice"]
