@@ -158,6 +158,18 @@ def _strip_optional_str(v: Optional[str]) -> Optional[str]:
     return t if t else None
 
 
+def _split_category_alias_names(raw: Any) -> List[str]:
+    """将「大白、大白货车、白壳电池」这类合并别名拆成独立品类别名。"""
+    if raw is None:
+        return []
+    parts = [
+        x.strip()
+        for x in re.split(r"[、,，]+", str(raw).replace("\u3000", " "))
+        if x.strip()
+    ]
+    return list(dict.fromkeys(parts))
+
+
 def _color_config_to_json_str(val: Any) -> Optional[str]:
     if val is None:
         return None
@@ -1868,15 +1880,13 @@ class TLService:
             raw = item.get("品种名")
             if raw is None:
                 continue
-            n = str(raw).strip()
-            if not n:
-                continue
-            if len(n) > 50:
-                raise ValueError(f"品种名长度不能超过50字符: {n[:30]}…")
-            if n in seen:
-                continue
-            seen.add(n)
-            names.append(n)
+            for n in _split_category_alias_names(raw):
+                if len(n) > 50:
+                    raise ValueError(f"品种名长度不能超过50字符: {n[:30]}…")
+                if n in seen:
+                    continue
+                seen.add(n)
+                names.append(n)
 
         if not names:
             raise ValueError("无有效的品种名")
@@ -4577,14 +4587,15 @@ class TLService:
         for raw in names:
             if raw is None:
                 continue
-            n = str(raw).strip()
-            if not n:
+            parts = _split_category_alias_names(raw)
+            if not parts:
                 raise ValueError("品类名称列表中含空名称")
-            if len(n) > 50:
-                raise ValueError(f"品种名长度不能超过 50: {n!r}")
-            if n not in seen:
-                seen.add(n)
-                norm.append(n)
+            for n in parts:
+                if len(n) > 50:
+                    raise ValueError(f"品种名长度不能超过 50: {n!r}")
+                if n not in seen:
+                    seen.add(n)
+                    norm.append(n)
         if not norm:
             raise ValueError("品类名称列表不能为空")
         return norm
