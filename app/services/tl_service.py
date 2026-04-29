@@ -1954,14 +1954,16 @@ class TLService:
         category_ids: List[int],
         price_type: Optional[str] = None,
         tons: float = 1.0,
+        tons_by_category: Optional[Dict[int, float]] = None,
         optimal_basis_list: Optional[List[str]] = None,
         optimal_sort_basis: Optional[str] = None,
         quote_date_str: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         price_type: 目标税率类型，None=普通价, 1pct/3pct/13pct/normal_invoice/reverse_invoice
-        吨数 t: **单价**为展示用「报价」（元/吨，按 price_type 折合不含税）；**总价** = 单价×t = **`报价金额`**；
+        吨数 t（按品类）：**单价**为展示用「报价」（元/吨，按 price_type 折合不含税）；**总价** = 单价×t = **`报价金额`**；
         **运费单价**（元/吨）来自运费表；**运费** = 运费单价×t = **`总运费`**（全程运费金额，元）；
+        若传入 ``tons_by_category``，则每个品类使用对应 t；否则所有品类共用 ``tons``。
         **利润** = 总价 − 运费（与 **报价金额 − 总运费** 一致）。
         明细中同时保留 **`报价`/`报价金额`/`总运费`** 与上述 **`单价`/`总价`/`运费单价`/`运费`** 便于新旧前端兼容。
         前端最终比价、明细排序与 **`冶炼厂利润排行`** 均以该 **`利润`**（及所选最优价口径）为准。
@@ -2299,11 +2301,16 @@ class TLService:
 
                 return None, "unavailable", None
 
-            # 组合结果；总运费 = 运费单价（元/吨）× 吨数；总价 = 单价（元/吨）× 吨数
-            t = float(tons)
+            # 组合结果；总运费 = 运费单价（元/吨）× 该品类吨数；总价 = 单价（元/吨）× 该品类吨数
+            def tons_for_category(cid: int) -> float:
+                if tons_by_category is not None:
+                    return float(tons_by_category[int(cid)])
+                return float(tons)
+
             result: List[Dict[str, Any]] = []
             for (wid, fid), (wname, fname, freight) in freight_map.items():
                 for cid in category_ids:
+                    t = tons_for_category(cid)
                     cat_name = cat_map.get(cid)
                     if cat_name is None:
                         continue

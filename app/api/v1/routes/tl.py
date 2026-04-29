@@ -982,12 +982,16 @@ def get_comparison(
 ):
     """明细含单价/总价/运费单价/运费及兼容字段报价/报价金额/总运费；利润=总价−运费。"""
     try:
+        tons_by = None
+        if body.品类吨数列表:
+            tons_by = {int(x.品类id): float(x.吨数) for x in body.品类吨数列表}
         out = service.get_comparison(
             warehouse_ids=body.选中仓库id列表,
             smelter_ids=body.冶炼厂id列表,
             category_ids=body.品类id列表,
             price_type=body.price_type,
             tons=body.吨数,
+            tons_by_category=tons_by,
             optimal_basis_list=body.最优价计税口径列表,
             optimal_sort_basis=body.最优价排序口径,
             quote_date_str=body.报价日期,
