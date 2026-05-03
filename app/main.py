@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 import app.config as app_config  # noqa: F401 — 加载项目根 .env（副作用）
 from app.api.v1.router import api_router
-from app.database import create_tables, init_default_data
+from app.database import create_tables
 from app.logging_config import setup_logging
 from app.intelligent_prediction.exceptions import BusinessException
 from app.request_context import bind_operator_context, reset_operator_context
@@ -89,7 +89,6 @@ async def log_http_requests(request: Request, call_next):
 async def on_startup():
     _warn_insecure_defaults()
     create_tables()
-    init_default_data()
     try:
         from app.services.permission_service import PermissionService
 

@@ -115,6 +115,78 @@ def _unit_for_optimal_price_basis(
     return None
 
 
+def _build_comparison_price_metrics(
+    price: Optional[float],
+    source: str,
+    qrow: Optional[Dict[str, Optional[float]]],
+    merged: Dict[str, float],
+    target_tax: Optional[str],
+    t: float,
+    fr: float,
+    bases: List[str],
+) -> Dict[str, Any]:
+    """
+    由 resolve 得到的报价与运费、吨数生成比价行中的价/税/利润字段块
+    （不含仓库、冶炼厂、品类等展示维度）。
+    """
+    if price is not None and target_tax and target_tax in merged:
+        p_net = round(net_from_inclusive(float(price), merged[target_tax]), 2)
+    elif price is not None:
+        p_net = float(price)
+    else:
+        p_net = None
+
+    freight_cost_total = round(float(fr) * t, 2)
+
+    quote_amount: Optional[float] = (
+        round(float(p_net) * t, 2) if p_net is not None else None
+    )
+    profit = (
+        round(quote_amount - freight_cost_total, 2)
+        if quote_amount is not None
+        else round(-freight_cost_total, 2)
+    )
+
+    breakdown = (
+        derive_net_and_vat_from_quote_row(qrow, merged) if qrow else None
+    )
+    if breakdown:
+        base_net, p1_vat, p3_vat, _p13 = breakdown
+        profit_base = round(base_net * t - freight_cost_total, 2)
+        profit_3 = round(p3_vat * t - freight_cost_total, 2)
+    else:
+        base_net = None
+        p1_vat = None
+        p3_vat = None
+        profit_base = None
+        profit_3 = None
+
+    optimal_profits: Dict[str, Optional[float]] = {}
+    for b in bases:
+        u = _unit_for_optimal_price_basis(b, breakdown, qrow)
+        optimal_profits[b] = (
+            round(u * t - freight_cost_total, 2) if u is not None else None
+        )
+
+    return {
+        "单价": p_net if source != "unavailable" else None,
+        "总价": quote_amount,
+        "运费单价": fr,
+        "运费": freight_cost_total,
+        "总运费": freight_cost_total,
+        "报价": p_net if source != "unavailable" else None,
+        "报价金额": quote_amount,
+        "报价来源": source,
+        "基准价": base_net,
+        "含1%税价": p1_vat,
+        "含3%税价": p3_vat,
+        "利润": profit,
+        "利润_基准": profit_base,
+        "利润_含3%": profit_3,
+        "最优价各口径利润": optimal_profits,
+    }
+
+
 class PurchaseSuggestionLLMError(Exception):
     """采购建议接口调用上游大模型失败（由路由映射为 HTTP 502）。"""
 
@@ -1989,6 +2061,13 @@ class TLService:
         - `冶炼厂id列表` 仅过滤停用厂后 **保持请求中的顺序与去重结果**；
         - 对每个「选中仓库 × 上述冶炼厂 × 选中品类」均返回明细行；若该组合在 `freight_rates` 中尚无记录，
           **运费单价按 0** 补行，避免「库里勾选了厂但响应里完全没有该厂」的错位感。
+
+        **循融宝（dict_factories.use_xunrongbao=1）**：
+        - 库内 `quote_details` 按**不含**循融宝吨加价；加价版按 `XUNRONGBAO_SHIPPING_PREMIUM_PER_TON`（默认 80 元/吨）
+          在不含税基准上加价后重算各含税列（与 `apply_per_ton_premium_to_quote_row` 一致）。
+        - 明细**顶层**的单价/总价/利润/最优价等仍为**含循融宝**口径（与历史接口一致，便于沿用排序与冶炼厂排行）；
+          另返回 **`不含循融宝`**、**`含循融宝`** 两个字典，结构相同、分别标注两种计价；非循融宝厂该两字为 `null`，
+          **`冶炼厂循融宝发货`** 为 0，**`循融宝加价元每吨`** 为 `null`。
         """
         if not warehouse_ids or not smelter_ids or not category_ids:
             return {
@@ -2227,14 +2306,16 @@ class TLService:
                         tuple(smelter_ids),
                     )
                     xrb_fids = {int(r[0]) for r in cur.fetchall() if int(r[1]) == 1}
-                    for map_key in list(raw_price_map.keys()):
+                    # 循融宝厂：库内报价为「不含加价」；加价版单独建表，与 raw_price_map 并行取价
+                    raw_price_map_xrb: Dict[tuple, Dict[str, Optional[float]]] = {}
+                    for map_key, prow in raw_price_map.items():
                         fid_k, _cname = map_key
                         if fid_k not in xrb_fids:
                             continue
-                        merged = merge_factory_rates(tax_rate_map.get(fid_k, {}))
-                        raw_price_map[map_key] = apply_per_ton_premium_to_quote_row(
-                            raw_price_map[map_key],
-                            merged,
+                        merged_x = merge_factory_rates(tax_rate_map.get(fid_k, {}))
+                        raw_price_map_xrb[map_key] = apply_per_ton_premium_to_quote_row(
+                            dict(prow),
+                            merged_x,
                             XUNRONGBAO_SHIPPING_PREMIUM_PER_TON,
                         )
 
@@ -2247,7 +2328,9 @@ class TLService:
             }
 
             def resolve_price(
-                fid: int, cat_id: int
+                fid: int,
+                cat_id: int,
+                raw_map: Dict[tuple, Dict[str, Optional[float]]],
             ) -> Tuple[Optional[float], str, Optional[Dict[str, Optional[float]]]]:
                 """
                 返回 (price, source, prices_row)。
@@ -2257,7 +2340,7 @@ class TLService:
                 """
                 cat_names = cat_id_to_names.get(cat_id, [])
                 for cat_name in cat_names:
-                    prices = raw_price_map.get((fid, cat_name), {})
+                    prices = raw_map.get((fid, cat_name), {})
                     if not prices or not any(
                         v is not None for v in prices.values()
                     ):
@@ -2307,6 +2390,34 @@ class TLService:
                     return float(tons_by_category[int(cid)])
                 return float(tons)
 
+            _xrb_nested_keys = (
+                "单价",
+                "总价",
+                "运费单价",
+                "运费",
+                "总运费",
+                "报价",
+                "报价金额",
+                "报价来源",
+                "基准价",
+                "含1%税价",
+                "含3%税价",
+                "利润",
+                "利润_基准",
+                "利润_含3%",
+                "最优价各口径利润",
+            )
+
+            def _xrb_branch_snapshot(metrics: Dict[str, Any]) -> Dict[str, Any]:
+                snap: Dict[str, Any] = {}
+                for k in _xrb_nested_keys:
+                    v = metrics[k]
+                    if k == "最优价各口径利润" and isinstance(v, dict):
+                        snap[k] = dict(v)
+                    else:
+                        snap[k] = v
+                return snap
+
             result: List[Dict[str, Any]] = []
             for (wid, fid), (wname, fname, freight) in freight_map.items():
                 for cid in category_ids:
@@ -2314,49 +2425,51 @@ class TLService:
                     cat_name = cat_map.get(cid)
                     if cat_name is None:
                         continue
-                    price, source, qrow = resolve_price(fid, cid)
-                    merged = merge_factory_rates(tax_rate_map.get(fid, {}))
-                    if price is not None and target_tax and target_tax in merged:
-                        p_net = round(
-                            net_from_inclusive(float(price), merged[target_tax]), 2
-                        )
-                    elif price is not None:
-                        p_net = float(price)
-                    else:
-                        p_net = None
-
                     fr = float(freight) if freight is not None else 0.0
-                    freight_cost_total = round(fr * t, 2)
+                    merged = merge_factory_rates(tax_rate_map.get(fid, {}))
+                    xrb_on = fid in xrb_fids
 
-                    quote_amount: Optional[float] = (
-                        round(float(p_net) * t, 2) if p_net is not None else None
+                    price_exc, source_exc, qrow_exc = resolve_price(
+                        fid, cid, raw_price_map
                     )
-                    profit = (
-                        round(quote_amount - freight_cost_total, 2)
-                        if quote_amount is not None
-                        else round(-freight_cost_total, 2)
-                    )
-
-                    breakdown = (
-                        derive_net_and_vat_from_quote_row(qrow, merged) if qrow else None
-                    )
-                    if breakdown:
-                        base_net, p1_vat, p3_vat, _p13 = breakdown
-                        profit_base = round(base_net * t - freight_cost_total, 2)
-                        profit_3 = round(p3_vat * t - freight_cost_total, 2)
-                    else:
-                        base_net = None
-                        p1_vat = None
-                        p3_vat = None
-                        profit_base = None
-                        profit_3 = None
-
-                    optimal_profits: Dict[str, Optional[float]] = {}
-                    for b in bases:
-                        u = _unit_for_optimal_price_basis(b, breakdown, qrow)
-                        optimal_profits[b] = (
-                            round(u * t - freight_cost_total, 2) if u is not None else None
+                    if xrb_on:
+                        price_inc, source_inc, qrow_inc = resolve_price(
+                            fid, cid, raw_price_map_xrb
                         )
+                        metrics_exc = _build_comparison_price_metrics(
+                            price_exc,
+                            source_exc,
+                            qrow_exc,
+                            merged,
+                            target_tax,
+                            t,
+                            fr,
+                            bases,
+                        )
+                        metrics_inc = _build_comparison_price_metrics(
+                            price_inc,
+                            source_inc,
+                            qrow_inc,
+                            merged,
+                            target_tax,
+                            t,
+                            fr,
+                            bases,
+                        )
+                        top = metrics_inc
+                    else:
+                        metrics_inc = _build_comparison_price_metrics(
+                            price_exc,
+                            source_exc,
+                            qrow_exc,
+                            merged,
+                            target_tax,
+                            t,
+                            fr,
+                            bases,
+                        )
+                        metrics_exc = metrics_inc
+                        top = metrics_inc
 
                     rec: Dict[str, Any] = {
                         "仓库id": wid,
@@ -2368,22 +2481,19 @@ class TLService:
                         "price_type": price_type_name,
                         "吨数": t,
                         "运费计价方式": "per_ton",
-                        # 单价/总价/运费：总价=单价×吨数；运费=运费单价×吨数；利润=总价−运费
-                        "单价": p_net if source != "unavailable" else None,
-                        "总价": quote_amount,
-                        "运费单价": fr,
-                        "运费": freight_cost_total,
-                        "总运费": freight_cost_total,
-                        "报价": p_net if source != "unavailable" else None,
-                        "报价金额": quote_amount,
-                        "报价来源": source,
-                        "基准价": base_net,
-                        "含1%税价": p1_vat,
-                        "含3%税价": p3_vat,
-                        "利润": profit,
-                        "利润_基准": profit_base,
-                        "利润_含3%": profit_3,
-                        "最优价各口径利润": optimal_profits,
+                        **top,
+                        "冶炼厂循融宝发货": 1 if xrb_on else 0,
+                        "循融宝加价元每吨": (
+                            float(XUNRONGBAO_SHIPPING_PREMIUM_PER_TON)
+                            if xrb_on
+                            else None
+                        ),
+                        "不含循融宝": (
+                            _xrb_branch_snapshot(metrics_exc) if xrb_on else None
+                        ),
+                        "含循融宝": (
+                            _xrb_branch_snapshot(metrics_inc) if xrb_on else None
+                        ),
                     }
                     result.append(rec)
 
